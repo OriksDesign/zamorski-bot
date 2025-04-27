@@ -1,17 +1,17 @@
-# --- bot.py ---
+# bot.py
 
+import os
+import asyncio
 from aiogram import Bot, Dispatcher, types
 from aiogram import F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-import asyncio
-import os
+from aiogram.types import CallbackQuery
 
-# Токен беремо із змінної середовища
-API_TOKEN = os.getenv("API_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
+API_TOKEN = os.getenv('API_TOKEN')
+ADMIN_ID = int(os.getenv('ADMIN_ID'))
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
@@ -20,7 +20,10 @@ class SendNews(StatesGroup):
     waiting_for_photo = State()
     waiting_for_caption = State()
 
-# Збереження користувача
+class OperatorReply(StatesGroup):
+    waiting_for_reply_text = State()
+    replying_to_user = State()
+
 def save_user(user_id):
     if not os.path.exists("users.txt"):
         with open("users.txt", "w") as f:
@@ -42,7 +45,7 @@ async def cmd_start(message: types.Message):
         ],
         resize_keyboard=True
     )
-    await message.answer("Вітаємо у магазині Заморські подарунки! Оберіть опцію нижче:", reply_markup=keyboard)
+    await message.answer("Вітаємо у магазині Заморські подарунки! Оберіть, будь ласка:", reply_markup=keyboard)
 
 @dp.message(F.text == "Умови співпраці")
 async def work_conditions(message: types.Message):
@@ -50,18 +53,52 @@ async def work_conditions(message: types.Message):
 
 @dp.message(F.text == "Новинки")
 async def new_arrivals(message: types.Message):
-    await message.answer("Останні новинки магазину тут: https://zamorskiepodarki.com/")
+    await message.answer("Останні новинки нашого магазину можна переглянути тут: https://zamorskiepodarki.com/")
 
 @dp.message(F.text == "Питання оператору")
-async def ask_operator(message: types.Message):
-    await message.answer("Будь ласка, напишіть ваше питання, і оператор незабаром відповість.")
+async def ask_operator(message: types.Message, state: FSMContext):
+    await message.answer("Будь ласка, напишіть ваше питання:")
+    await state.set_state(OperatorReply.waiting_for_reply_text)
 
 @dp.message(F.text == "Підписатися на розсилку")
-async def subscribe_newsletter(message: types.Message):
+async def subscribe_user(message: types.Message):
     save_user(message.from_user.id)
-    await message.answer("Ви успішно підписалися на розсилку! ✅")
+    await message.answer("Ви успішно підписалися на розсилку!")
 
-# Розсилка: команда /sendnews
+@dp.message(OperatorReply.waiting_for_reply_text)
+async def receive_question(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    text = message.text
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Відповісти", callback_data=f"reply_{user_id}")]
+        ]
+    )
+
+    await bot.send_message(chat_id=ADMIN_ID, text=f"Нове питання від користувача {user_id}:\n\n{text}", reply_markup=keyboard)
+    await message.answer("Ваше питання передано оператору. Очікуйте відповіді.")
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("reply_"))
+async def reply_to_user(call: CallbackQuery, state: FSMContext):
+    user_id = int(call.data.split("_")[1])
+    await call.message.answer(f"Напишіть відповідь для користувача {user_id}:")
+    await state.update_data(reply_user_id=user_id)
+    await state.set_state(OperatorReply.replying_to_user)
+    await call.answer()
+
+@dp.message(OperatorReply.replying_to_user)
+async def send_reply_to_user(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    user_id = data.get("reply_user_id")
+    try:
+        await bot.send_message(chat_id=user_id, text=message.text)
+        await message.answer("Відповідь надіслано користувачу.")
+    except Exception as e:
+        await message.answer(f"Помилка при надсиланні відповіді: {e}")
+    await state.clear()
+
 @dp.message(Command('sendnews'))
 async def cmd_sendnews(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
@@ -123,10 +160,11 @@ async def get_news_caption(message: types.Message, state: FSMContext):
     await message.answer(f"Розсилка завершена. Надіслано {count} повідомлень.")
     await state.clear()
 
-# Запуск бота
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# --- Кінець bot.py ---
