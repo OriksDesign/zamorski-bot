@@ -8,7 +8,6 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery
 
 API_TOKEN = os.getenv('API_TOKEN')
 ADMIN_ID = int(os.getenv('ADMIN_ID'))
@@ -20,84 +19,66 @@ class SendNews(StatesGroup):
     waiting_for_photo = State()
     waiting_for_caption = State()
 
-class OperatorReply(StatesGroup):
-    waiting_for_reply_text = State()
-    replying_to_user = State()
+class OperatorChat(StatesGroup):
+    waiting_for_reply = State()
+
+keyboard_main = types.ReplyKeyboardMarkup(
+    keyboard=[
+        [types.KeyboardButton(text="Умови співпраці")],
+        [types.KeyboardButton(text="Питання оператору")],
+        [types.KeyboardButton(text="Новинки")],
+        [types.KeyboardButton(text="Підписатися на розсилку")]
+    ],
+    resize_keyboard=True,
+    is_persistent=True
+)
+
+if not os.path.exists("users.txt"):
+    with open("users.txt", "w"): pass
 
 def save_user(user_id):
-    if not os.path.exists("users.txt"):
-        with open("users.txt", "w") as f:
-            f.write("")
     with open("users.txt", "r+") as f:
         users = f.read().splitlines()
         if str(user_id) not in users:
             f.write(f"{user_id}\n")
+            asyncio.create_task(bot.send_message(chat_id=ADMIN_ID, text=f"Новий підписник: {user_id}"))
+
+def is_user_saved(user_id):
+    with open("users.txt", "r") as f:
+        return str(user_id) in f.read().splitlines()
 
 @dp.message(Command('start'))
 async def cmd_start(message: types.Message):
     save_user(message.from_user.id)
-    keyboard = types.ReplyKeyboardMarkup(
-        keyboard=[
-            [types.KeyboardButton(text="Умови співпраці")],
-            [types.KeyboardButton(text="Питання оператору")],
-            [types.KeyboardButton(text="Новинки")],
-            [types.KeyboardButton(text="Підписатися на розсилку")]
-        ],
-        resize_keyboard=True
+    await message.answer("Вітаємо у магазині Заморські подарунки! Оберіть, будь ласка:", reply_markup=keyboard_main)
+
+@dp.message(Command('help'))
+async def cmd_help(message: types.Message):
+    await message.answer(
+        "/start – Почати спілкування\n/help – Як працює бот\n/sendnews – Для адміністратора (розсилка)",
+        reply_markup=keyboard_main
     )
-    await message.answer("Вітаємо у магазині Заморські подарунки! Оберіть, будь ласка:", reply_markup=keyboard)
 
 @dp.message(F.text == "Умови співпраці")
 async def work_conditions(message: types.Message):
-    await message.answer("Наші умови співпраці:\n🚚 Доставка по Україні\n💳 Оплата онлайн або при отриманні\n🔄 Обмін/повернення протягом 14 днів.")
+    await message.answer("Наші умови співпраці:\n🚚 Доставка по Україні\n💳 Оплата онлайн або при отриманні\n🔄 Обмін/повернення протягом 14 днів.", reply_markup=keyboard_main)
 
 @dp.message(F.text == "Новинки")
 async def new_arrivals(message: types.Message):
-    await message.answer("Останні новинки нашого магазину можна переглянути тут: https://zamorskiepodarki.com/")
+    await message.answer("Останні новинки нашого магазину можна переглянути тут: https://zamorskiepodarki.com/", reply_markup=keyboard_main)
 
 @dp.message(F.text == "Питання оператору")
 async def ask_operator(message: types.Message, state: FSMContext):
     await message.answer("Будь ласка, напишіть ваше питання:")
-    await state.set_state(OperatorReply.waiting_for_reply_text)
+    await state.set_state(SendNews.waiting_for_caption)
 
 @dp.message(F.text == "Підписатися на розсилку")
 async def subscribe_user(message: types.Message):
-    save_user(message.from_user.id)
-    await message.answer("Ви успішно підписалися на розсилку!")
-
-@dp.message(OperatorReply.waiting_for_reply_text)
-async def receive_question(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    text = message.text
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Відповісти", callback_data=f"reply_{user_id}")]
-        ]
-    )
-
-    await bot.send_message(chat_id=ADMIN_ID, text=f"Нове питання від користувача {user_id}:\n\n{text}", reply_markup=keyboard)
-    await message.answer("Ваше питання передано оператору. Очікуйте відповіді.")
-    await state.clear()
-
-@dp.callback_query(F.data.startswith("reply_"))
-async def reply_to_user(call: CallbackQuery, state: FSMContext):
-    user_id = int(call.data.split("_")[1])
-    await call.message.answer(f"Напишіть відповідь для користувача {user_id}:")
-    await state.update_data(reply_user_id=user_id)
-    await state.set_state(OperatorReply.replying_to_user)
-    await call.answer()
-
-@dp.message(OperatorReply.replying_to_user)
-async def send_reply_to_user(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    user_id = data.get("reply_user_id")
-    try:
-        await bot.send_message(chat_id=user_id, text=message.text)
-        await message.answer("Відповідь надіслано користувачу.")
-    except Exception as e:
-        await message.answer(f"Помилка при надсиланні відповіді: {e}")
-    await state.clear()
+    if is_user_saved(message.from_user.id):
+        await message.answer("Ви вже підписані на розсилку!", reply_markup=keyboard_main)
+    else:
+        save_user(message.from_user.id)
+        await message.answer("Ви успішно підписалися на розсилку!", reply_markup=keyboard_main)
 
 @dp.message(Command('sendnews'))
 async def cmd_sendnews(message: types.Message, state: FSMContext):
@@ -129,13 +110,13 @@ async def get_news_caption(message: types.Message, state: FSMContext):
 
     full_caption = announcement + user_text
 
-    if not os.path.exists("users.txt"):
-        await message.answer("Немає зареєстрованих користувачів для розсилки.")
-        await state.clear()
-        return
-
     with open("users.txt", "r") as f:
         users = f.read().splitlines()
+
+    if not users:
+        await message.answer("Немає зареєстрованих користувачів для розсилки.", reply_markup=keyboard_main)
+        await state.clear()
+        return
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -157,7 +138,42 @@ async def get_news_caption(message: types.Message, state: FSMContext):
         except Exception as e:
             print(f"Помилка при відправці користувачу {user_id}: {e}")
 
-    await message.answer(f"Розсилка завершена. Надіслано {count} повідомлень.")
+    await message.answer(f"Розсилка завершена. Надіслано {count} повідомлень.", reply_markup=keyboard_main)
+    await state.clear()
+
+@dp.message(SendNews.waiting_for_caption)
+async def operator_question(message: types.Message):
+    text = message.text
+    await bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"Нове питання від користувача {message.from_user.id}:\n{text}",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Відповісти", callback_data=f"reply_{message.from_user.id}")]
+            ]
+        )
+    )
+    await message.answer("Ваше питання передано оператору. Очікуйте відповідь.")
+    await asyncio.sleep(2)
+    await message.answer("Оберіть опцію нижче:", reply_markup=keyboard_main)
+
+@dp.callback_query()
+async def operator_reply_callback(callback: types.CallbackQuery, state: FSMContext):
+    if not callback.data.startswith("reply_"):
+        return
+    user_id = int(callback.data.split("_")[1])
+    await callback.message.answer(f"Напишіть відповідь для користувача {user_id}:")
+    await state.update_data(reply_to=user_id)
+    await state.set_state(OperatorChat.waiting_for_reply)
+    await callback.answer()
+
+@dp.message(OperatorChat.waiting_for_reply)
+async def send_operator_reply(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    reply_to = data.get("reply_to")
+    if reply_to:
+        await bot.send_message(chat_id=reply_to, text=message.text)
+        await message.answer("Відповідь надіслано користувачу.", reply_markup=keyboard_main)
     await state.clear()
 
 async def main():
