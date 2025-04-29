@@ -60,6 +60,14 @@ def get_main_keyboard(user_id):
         is_persistent=True
     )
 
+@dp.message(F.text == "Зробити розсилку")
+async def handle_news_button(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("У вас немає прав для цієї дії.")
+        return
+    await message.answer("Будь ласка, надішліть фото для розсилки.")
+    await state.set_state(SendNews.waiting_for_photo)
+
 def save_user(user_id):
     with connection.cursor() as cursor:
         cursor.execute("SELECT * FROM subscribers WHERE user_id = %s", (user_id,))
