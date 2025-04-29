@@ -77,15 +77,48 @@ def is_user_saved(user_id):
         cursor.execute("SELECT * FROM subscribers WHERE user_id = %s", (user_id,))
         return cursor.fetchone() is not None
 
-# Функція для розсилки новин
-async def get_news_caption():
-    announcement = (
-        "Новинки у 'Заморських подарунках'!\n"
-        "Ми отримали нове надходження екзотичних сувенірів, ароматів та декору.\n"
-        "Знижки на обрані товари!\n"
-        "Переглянути всі новинки можна за посиланням нижче.\n"
-        "——————\n"
-    )
-    return announcement
+@dp.message(F.text == "Питання оператору")
+async def ask_operator(message: types.Message, state: FSMContext):
+    buttons = [
+        [types.KeyboardButton(text="📦 Надіслати ТТН по замовленню")],
+        [types.KeyboardButton(text="📞 Зв’язок з оператором")],
+        [types.KeyboardButton(text="💳 Я надіслав оплату")],
+        [types.KeyboardButton(text="📦 Коли очікувати доставку")],
+        [types.KeyboardButton(text="❌ Скасувати замовлення")],
+        [types.KeyboardButton(text="🏠 Змінити адресу доставки")],
+        [types.KeyboardButton(text="⬅️ Повернутися до меню")]
+    ]
+    await message.answer("Будь ласка, оберіть ваше питання:", reply_markup=types.ReplyKeyboardMarkup(
+        keyboard=buttons, resize_keyboard=True, is_persistent=True
+    ))
+    await state.set_state(OperatorQuestion.waiting_for_choice)
 
-# Увага: інші обробники повідомлень, стейти і логіка мають бути підключені окремо нижче, якщо потрібно
+@dp.message(OperatorQuestion.waiting_for_choice)
+async def handle_operator_choice(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    choice = message.text.strip()
+
+    if choice == "⬅️ Повернутися до меню":
+        await message.answer("Повертаємось до головного меню:", reply_markup=get_main_keyboard(user_id))
+        await state.clear()
+        return
+
+    elif choice == "💳 Я надіслав оплату":
+        await message.answer("Будь ласка, надішліть фото для підтвердження оплати:")
+        await state.set_state(OperatorQuestion.waiting_for_payment)
+        return
+
+    await bot.send_message(chat_id=ADMIN_ID, text=f"Клієнт {user_id} просить: {choice}")
+    await message.answer("Ваш запит відправлений оператору.")
+    await state.clear()
+
+@dp.message(OperatorQuestion.waiting_for_payment, F.photo)
+async def handle_payment_photo(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    photo_id = message.photo[-1].file_id
+    caption = f"Клієнт {user_id} надіслав підтвердження оплати."
+    await bot.send_photo(chat_id=ADMIN_ID, photo=photo_id, caption=caption)
+    await message.answer("Дякуємо! Ваше підтвердження надіслано оператору.")
+    await state.clear()
+
+# ... решта твого коду залишається без змін (додавання новин, відповіді оператора, /start і т.д.)
