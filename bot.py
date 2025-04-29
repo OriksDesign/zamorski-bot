@@ -86,7 +86,7 @@ async def get_news_caption(message: types.Message, state: FSMContext):
     user_text = message.text
 
     announcement = (
-        "*Новинки у \"Заморських подарунках\"!*
+        "Новинки у 'Заморських подарунках'!"
 
 "
         "Ми отримали нове надходження екзотичних сувенірів, ароматів та декору.
