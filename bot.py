@@ -26,16 +26,20 @@ class OperatorQuestion(StatesGroup):
     waiting_for_choice = State()
     waiting_for_payment = State()
 
-keyboard_main = types.ReplyKeyboardMarkup(
-    keyboard=[
+def get_main_keyboard(user_id):
+    buttons = [
         [types.KeyboardButton(text="Умови співпраці")],
         [types.KeyboardButton(text="Питання оператору")],
         [types.KeyboardButton(text="Новинки")],
         [types.KeyboardButton(text="Підписатися на розсилку")]
-    ],
-    resize_keyboard=True,
-    is_persistent=True
-)
+    ]
+    if user_id == ADMIN_ID:
+        buttons.append([types.KeyboardButton(text="Зробити розсилку")])
+    return types.ReplyKeyboardMarkup(
+        keyboard=buttons,
+        resize_keyboard=True,
+        is_persistent=True
+    )
 
 inline_operator_keyboard = InlineKeyboardMarkup(
     inline_keyboard=[
@@ -66,30 +70,30 @@ def is_user_saved(user_id):
 @dp.message(Command('start'))
 async def cmd_start(message: types.Message):
     save_user(message.from_user.id)
-    await message.answer("Вітаємо у магазині Заморські подарунки! Оберіть, будь ласка:", reply_markup=keyboard_main)
+    await message.answer("Вітаємо у магазині Заморські подарунки! Оберіть, будь ласка:", reply_markup=get_main_keyboard(message.from_user.id))
 
 @dp.message(Command('help'))
 async def cmd_help(message: types.Message):
     await message.answer(
         "/start – Почати спілкування\n/help – Як працює бот\n/sendnews – Для адміністратора (розсилка)",
-        reply_markup=keyboard_main
+        reply_markup=get_main_keyboard(message.from_user.id)
     )
 
 @dp.message(F.text == "Умови співпраці")
 async def work_conditions(message: types.Message):
-    await message.answer("Наші умови співпраці:\n🚚 Доставка по Україні\n💳 Оплата онлайн або при отриманні\n🔄 Обмін/повернення протягом 14 днів.", reply_markup=keyboard_main)
+    await message.answer("Наші умови співпраці:\n🚚 Доставка по Україні\n💳 Оплата онлайн або при отриманні\n🔄 Обмін/повернення протягом 14 днів.", reply_markup=get_main_keyboard(message.from_user.id))
 
 @dp.message(F.text == "Новинки")
 async def new_arrivals(message: types.Message):
-    await message.answer("Останні новинки нашого магазину можна переглянути тут: https://zamorskiepodarki.com/", reply_markup=keyboard_main)
+    await message.answer("Останні новинки нашого магазину можна переглянути тут: https://zamorskiepodarki.com/", reply_markup=get_main_keyboard(message.from_user.id))
 
 @dp.message(F.text == "Підписатися на розсилку")
 async def subscribe_user(message: types.Message):
     if is_user_saved(message.from_user.id):
-        await message.answer("Ви вже підписані на розсилку!", reply_markup=keyboard_main)
+        await message.answer("Ви вже підписані на розсилку!", reply_markup=get_main_keyboard(message.from_user.id))
     else:
         save_user(message.from_user.id)
-        await message.answer("Ви успішно підписалися на розсилку!", reply_markup=keyboard_main)
+        await message.answer("Ви успішно підписалися на розсилку!", reply_markup=get_main_keyboard(message.from_user.id))
 
 @dp.message(F.text == "Питання оператору")
 async def ask_operator(message: types.Message, state: FSMContext):
@@ -112,7 +116,7 @@ async def handle_operator_queries(callback: types.CallbackQuery, state: FSMConte
     }
     action = callback.data
     if action == "back_to_menu":
-        await callback.message.answer("Повернення до головного меню", reply_markup=keyboard_main)
+        await callback.message.answer("Повернення до головного меню", reply_markup=get_main_keyboard(user_id))
         await state.clear()
     else:
         text = action_texts.get(action, "звернувся до оператора")
@@ -125,7 +129,7 @@ async def handle_operator_queries(callback: types.CallbackQuery, state: FSMConte
                 ]
             )
         )
-        await callback.message.answer("Ваш запит передано оператору. Очікуйте відповідь.", reply_markup=keyboard_main)
+        await callback.message.answer("Ваш запит передано оператору. Очікуйте відповідь.", reply_markup=get_main_keyboard(user_id))
         await state.clear()
     await callback.answer()
 
@@ -149,7 +153,7 @@ async def receive_payment_proof(message: types.Message, state: FSMContext):
             ]
         )
     )
-    await message.answer("Ваш файл відправлений оператору. Очікуйте відповідь.", reply_markup=keyboard_main)
+    await message.answer("Ваш файл відправлений оператору. Очікуйте відповідь.", reply_markup=get_main_keyboard(user_id))
     await state.clear()
 
 @dp.callback_query(F.data.startswith("reply_"))
@@ -166,8 +170,15 @@ async def send_operator_reply(message: types.Message, state: FSMContext):
     reply_to = data.get("reply_to")
     if reply_to:
         await bot.send_message(chat_id=reply_to, text=message.text)
-        await message.answer("Відповідь надіслано користувачу.", reply_markup=keyboard_main)
+        await message.answer("Відповідь надіслано користувачу.", reply_markup=get_main_keyboard(message.from_user.id))
     await state.clear()
+
+@dp.message(F.text == "Зробити розсилку")
+async def admin_sendnews_button(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("У вас немає прав для цієї команди.")
+        return
+    await cmd_sendnews(message, state)
 
 @dp.message(Command('sendnews'))
 async def cmd_sendnews(message: types.Message, state: FSMContext):
@@ -203,7 +214,7 @@ async def get_news_caption(message: types.Message, state: FSMContext):
         users = f.read().splitlines()
 
     if not users:
-        await message.answer("Немає зареєстрованих користувачів для розсилки.", reply_markup=keyboard_main)
+        await message.answer("Немає зареєстрованих користувачів для розсилки.", reply_markup=get_main_keyboard(message.from_user.id))
         await state.clear()
         return
 
@@ -227,7 +238,7 @@ async def get_news_caption(message: types.Message, state: FSMContext):
         except Exception as e:
             print(f"Помилка при відправці користувачу {user_id}: {e}")
 
-    await message.answer(f"Розсилка завершена. Надіслано {count} повідомлень.", reply_markup=keyboard_main)
+    await message.answer(f"Розсилка завершена. Надіслано {count} повідомлень.", reply_markup=get_main_keyboard(message.from_user.id))
     await state.clear()
 
 async def main():
