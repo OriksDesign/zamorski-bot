@@ -20,6 +20,7 @@ class SendNews(StatesGroup):
     waiting_for_caption = State()
 
 class OperatorChat(StatesGroup):
+    waiting_for_question = State()
     waiting_for_reply = State()
 
 keyboard_main = types.ReplyKeyboardMarkup(
@@ -70,7 +71,7 @@ async def new_arrivals(message: types.Message):
 @dp.message(F.text == "Питання оператору")
 async def ask_operator(message: types.Message, state: FSMContext):
     await message.answer("Будь ласка, напишіть ваше питання:")
-    await state.set_state(SendNews.waiting_for_caption)
+    await state.set_state(OperatorChat.waiting_for_question)
 
 @dp.message(F.text == "Підписатися на розсилку")
 async def subscribe_user(message: types.Message):
@@ -141,8 +142,8 @@ async def get_news_caption(message: types.Message, state: FSMContext):
     await message.answer(f"Розсилка завершена. Надіслано {count} повідомлень.", reply_markup=keyboard_main)
     await state.clear()
 
-@dp.message(SendNews.waiting_for_caption)
-async def operator_question(message: types.Message):
+@dp.message(OperatorChat.waiting_for_question)
+async def operator_question(message: types.Message, state: FSMContext):
     text = message.text
     await bot.send_message(
         chat_id=ADMIN_ID,
@@ -153,9 +154,8 @@ async def operator_question(message: types.Message):
             ]
         )
     )
-    await message.answer("Ваше питання передано оператору. Очікуйте відповідь.")
-    await asyncio.sleep(2)
-    await message.answer("Оберіть опцію нижче:", reply_markup=keyboard_main)
+    await message.answer("Ваше питання передано оператору. Очікуйте відповідь.", reply_markup=keyboard_main)
+    await state.clear()
 
 @dp.callback_query()
 async def operator_reply_callback(callback: types.CallbackQuery, state: FSMContext):
