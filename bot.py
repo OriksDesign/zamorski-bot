@@ -5,7 +5,7 @@ import asyncio
 from aiogram import Bot, Dispatcher, types
 from aiogram import F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -20,8 +20,9 @@ class SendNews(StatesGroup):
     waiting_for_caption = State()
 
 class OperatorChat(StatesGroup):
-    waiting_for_question = State()
-    waiting_for_reply = State()
+    waiting_for_selection = State()
+    waiting_for_text = State()
+    waiting_for_file = State()
 
 keyboard_main = types.ReplyKeyboardMarkup(
     keyboard=[
@@ -32,6 +33,25 @@ keyboard_main = types.ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
     is_persistent=True
+)
+
+keyboard_operator_menu = types.ReplyKeyboardMarkup(
+    keyboard=[
+        [
+            types.KeyboardButton(text="📦 Надіслати ТТН по замовленню"),
+            types.KeyboardButton(text="👩‍💼 Зв'язок із оператором")
+        ],
+        [
+            types.KeyboardButton(text="💳 Я надіслав оплату"),
+            types.KeyboardButton(text="⏰ Коли очікувати доставку")
+        ],
+        [
+            types.KeyboardButton(text="🚫 Скасувати замовлення"),
+            types.KeyboardButton(text="📝 Змінити адресу доставки")
+        ],
+        [types.KeyboardButton(text="⬅️ Повернутись до головного меню")]
+    ],
+    resize_keyboard=True
 )
 
 if not os.path.exists("users.txt"):
@@ -68,11 +88,6 @@ async def work_conditions(message: types.Message):
 async def new_arrivals(message: types.Message):
     await message.answer("Останні новинки нашого магазину можна переглянути тут: https://zamorskiepodarki.com/", reply_markup=keyboard_main)
 
-@dp.message(F.text == "Питання оператору")
-async def ask_operator(message: types.Message, state: FSMContext):
-    await message.answer("Будь ласка, напишіть ваше питання:")
-    await state.set_state(OperatorChat.waiting_for_question)
-
 @dp.message(F.text == "Підписатися на розсилку")
 async def subscribe_user(message: types.Message):
     if is_user_saved(message.from_user.id):
@@ -80,6 +95,58 @@ async def subscribe_user(message: types.Message):
     else:
         save_user(message.from_user.id)
         await message.answer("Ви успішно підписалися на розсилку!", reply_markup=keyboard_main)
+
+@dp.message(F.text == "Питання оператору")
+async def ask_operator(message: types.Message, state: FSMContext):
+    await message.answer("Оберіть питання:", reply_markup=keyboard_operator_menu)
+    await state.set_state(OperatorChat.waiting_for_selection)
+
+@dp.message(OperatorChat.waiting_for_selection)
+async def handle_operator_selection(message: types.Message, state: FSMContext):
+    text = message.text
+
+    if text == "⬅️ Повернутись до головного меню":
+        await message.answer("Повертаємось до головного меню:", reply_markup=keyboard_main)
+        await state.clear()
+        return
+
+    if text == "📦 Надіслати ТТН по замовленню":
+        await bot.send_message(ADMIN_ID, f"Клієнт {message.from_user.id} просить надіслати ТТН.")
+        await message.answer("Ваш запит відправлений оператору.", reply_markup=keyboard_main)
+        await state.clear()
+    elif text == "👩‍💼 Зв'язок із оператором":
+        await message.answer("Будь ласка, введіть ваше питання:", reply_markup=ReplyKeyboardRemove())
+        await state.set_state(OperatorChat.waiting_for_text)
+    elif text == "💳 Я надіслав оплату":
+        await message.answer("Будь ласка, надішліть файл (скріншот) підтвердження оплати:", reply_markup=ReplyKeyboardRemove())
+        await state.set_state(OperatorChat.waiting_for_file)
+    elif text == "⏰ Коли очікувати доставку":
+        await bot.send_message(ADMIN_ID, f"Клієнт {message.from_user.id} запитує, коли буде доставка.")
+        await message.answer("Ваш запит відправлений оператору.", reply_markup=keyboard_main)
+        await state.clear()
+    elif text == "🚫 Скасувати замовлення":
+        await message.answer("Будь ласка, введіть причину скасування або номер замовлення:", reply_markup=ReplyKeyboardRemove())
+        await state.set_state(OperatorChat.waiting_for_text)
+    elif text == "📝 Змінити адресу доставки":
+        await message.answer("Будь ласка, введіть нову адресу доставки:", reply_markup=ReplyKeyboardRemove())
+        await state.set_state(OperatorChat.waiting_for_text)
+
+@dp.message(OperatorChat.waiting_for_text)
+async def receive_operator_text(message: types.Message, state: FSMContext):
+    await bot.send_message(ADMIN_ID, f"Нове повідомлення від {message.from_user.id}:\n{message.text}")
+    await message.answer("Ваше повідомлення надіслано оператору.", reply_markup=keyboard_main)
+    await state.clear()
+
+@dp.message(OperatorChat.waiting_for_file, F.photo | F.document)
+async def receive_operator_file(message: types.Message, state: FSMContext):
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        await bot.send_photo(chat_id=ADMIN_ID, photo=file_id, caption=f"Файл підтвердження оплати від {message.from_user.id}")
+    elif message.document:
+        file_id = message.document.file_id
+        await bot.send_document(chat_id=ADMIN_ID, document=file_id, caption=f"Файл підтвердження оплати від {message.from_user.id}")
+    await message.answer("Файл успішно надіслано оператору.", reply_markup=keyboard_main)
+    await state.clear()
 
 @dp.message(Command('sendnews'))
 async def cmd_sendnews(message: types.Message, state: FSMContext):
@@ -140,40 +207,6 @@ async def get_news_caption(message: types.Message, state: FSMContext):
             print(f"Помилка при відправці користувачу {user_id}: {e}")
 
     await message.answer(f"Розсилка завершена. Надіслано {count} повідомлень.", reply_markup=keyboard_main)
-    await state.clear()
-
-@dp.message(OperatorChat.waiting_for_question)
-async def operator_question(message: types.Message, state: FSMContext):
-    text = message.text
-    await bot.send_message(
-        chat_id=ADMIN_ID,
-        text=f"Нове питання від користувача {message.from_user.id}:\n{text}",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="Відповісти", callback_data=f"reply_{message.from_user.id}")]
-            ]
-        )
-    )
-    await message.answer("Ваше питання передано оператору. Очікуйте відповідь.", reply_markup=keyboard_main)
-    await state.clear()
-
-@dp.callback_query()
-async def operator_reply_callback(callback: types.CallbackQuery, state: FSMContext):
-    if not callback.data.startswith("reply_"):
-        return
-    user_id = int(callback.data.split("_")[1])
-    await callback.message.answer(f"Напишіть відповідь для користувача {user_id}:")
-    await state.update_data(reply_to=user_id)
-    await state.set_state(OperatorChat.waiting_for_reply)
-    await callback.answer()
-
-@dp.message(OperatorChat.waiting_for_reply)
-async def send_operator_reply(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    reply_to = data.get("reply_to")
-    if reply_to:
-        await bot.send_message(chat_id=reply_to, text=message.text)
-        await message.answer("Відповідь надіслано користувачу.", reply_markup=keyboard_main)
     await state.clear()
 
 async def main():
