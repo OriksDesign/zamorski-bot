@@ -77,55 +77,15 @@ def is_user_saved(user_id):
         cursor.execute("SELECT * FROM subscribers WHERE user_id = %s", (user_id,))
         return cursor.fetchone() is not None
 
-# Далі всі обробники залишаються без змін — вони вже використовують save_user та is_user_saved
-# (їх не потрібно змінювати)
-
-async def get_news_caption(message: types.Message, state: FSMContext):
-    user_data = await state.get_data()
-    photo_id = user_data.get("photo")
-    user_text = message.text
-
-   announcement = (
-    "Новинки у 'Заморських подарунках'!\n"
-    "Ми отримали нове надходження екзотичних сувенірів, ароматів та декору.\n"
-    "Знижки на обрані товари!\n"
-    "Переглянути всі новинки можна за посиланням нижче.\n"
-    "——————\n"
-)
-
-    full_caption = announcement + user_text
-
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT user_id FROM subscribers")
-        users = cursor.fetchall()
-
-    if not users:
-        await message.answer("Немає зареєстрованих користувачів для розсилки.", reply_markup=get_main_keyboard(message.from_user.id))
-        await state.clear()
-        return
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Перейти до магазину", url="https://zamorskiepodarki.com/")]
-        ]
+# Функція для розсилки новин
+async def get_news_caption():
+    announcement = (
+        "Новинки у 'Заморських подарунках'!\n"
+        "Ми отримали нове надходження екзотичних сувенірів, ароматів та декору.\n"
+        "Знижки на обрані товари!\n"
+        "Переглянути всі новинки можна за посиланням нижче.\n"
+        "——————\n"
     )
+    return announcement
 
-    count = 0
-    for user in users:
-        user_id = user['user_id']
-        try:
-            await bot.send_photo(
-                chat_id=user_id,
-                photo=photo_id,
-                caption=full_caption,
-                parse_mode="Markdown",
-                reply_markup=keyboard
-            )
-            count += 1
-        except Exception as e:
-            print(f"Помилка при відправці користувачу {user_id}: {e}")
-
-    await message.answer(f"Розсилка завершена. Надіслано {count} повідомлень.", reply_markup=get_main_keyboard(message.from_user.id))
-    await state.clear()
-
-# ... решта твого коду залишається без змін
+# Увага: інші обробники повідомлень, стейти і логіка мають бути підключені окремо нижче, якщо потрібно
