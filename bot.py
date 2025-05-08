@@ -12,23 +12,61 @@ from aiogram.fsm.state import State, StatesGroup
 API_TOKEN = os.getenv('API_TOKEN')
 ADMIN_ID = int(os.getenv('ADMIN_ID'))
 
-# Підключення до бази даних через pymysql
-try:
-    connection = pymysql.connect(
-        host=os.getenv('DB_HOST'),
-        user=os.getenv('DB_USER'),
-        password=os.getenv('DB_PASSWORD'),
-        database=os.getenv('DB_NAME'),
-        charset='utf8mb4',
-        cursorclass=pymysql.cursors.DictCursor
-    )
-    print("✅ Database connection successful")
-except pymysql.MySQLError as e:
-    print(f"❌ Database connection failed: {e}")
+# Підключення до бази даних через pymysql з автоматичним відновленням
+class DatabaseConnection:
+    def __init__(self):
+        self.host = os.getenv('DB_HOST')
+        self.user = os.getenv('DB_USER')
+        self.password = os.getenv('DB_PASSWORD')
+        self.database = os.getenv('DB_NAME')
+        self.connection = None
+        self.connect()
+
+    def connect(self):
+        try:
+            self.connection = pymysql.connect(
+                host=self.host,
+                user=self.user,
+                password=self.password,
+                database=self.database,
+                charset='utf8mb4',
+                cursorclass=pymysql.cursors.DictCursor
+            )
+            print("✅ Database connection successful")
+        except pymysql.MySQLError as e:
+            print(f"❌ Database connection failed: {e}")
+            self.connection = None
+
+    def get_cursor(self):
+        try:
+            if self.connection is None or not self.connection.open:
+                self.connect()
+            return self.connection.cursor()
+        except Exception as e:
+            print(f"❌ Database reconnection failed: {e}")
+            return None
+
+    def commit(self):
+        try:
+            if self.connection is not None and self.connection.open:
+                self.connection.commit()
+        except Exception as e:
+            print(f"❌ Database commit failed: {e}")
+
+    def close(self):
+        try:
+            if self.connection is not None:
+                self.connection.close()
+                print("✅ Database connection closed")
+        except Exception as e:
+            print(f"❌ Database close failed: {e}")
+
+# Ініціалізація з'єднання з базою даних
+db = DatabaseConnection()
 
 # Створення таблиці, якщо не існує
 try:
-    with connection.cursor() as cursor:
+    with db.get_cursor() as cursor:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS subscribers (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -36,9 +74,9 @@ try:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         ''')
-    connection.commit()
-    print("✅ Subscribers table ready")
-except pymysql.MySQLError as e:
+        db.commit()
+        print("✅ Subscribers table ready")
+except Exception as e:
     print(f"❌ Failed to create subscribers table: {e}")
 
 bot = Bot(token=API_TOKEN)
@@ -121,36 +159,3 @@ async def forward_question(message: types.Message, state: FSMContext):
         await state.clear()
     except Exception as e:
         await log_error(f"Помилка при надсиланні питання оператору: {e}")
-
-
-def save_user(user_id):
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM subscribers WHERE user_id = %s", (user_id,))
-            if not cursor.fetchone():
-                cursor.execute("INSERT INTO subscribers (user_id) VALUES (%s)", (user_id,))
-                connection.commit()
-                asyncio.create_task(bot.send_message(ADMIN_ID, f"Новий підписник: {user_id}"))
-    except Exception as e:
-        print(f"Помилка збереження користувача: {e}")
-
-
-def is_user_saved(user_id):
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM subscribers WHERE user_id = %s", (user_id,))
-            return cursor.fetchone() is not None
-    except Exception as e:
-        print(f"Помилка перевірки користувача: {e}")
-        return False
-
-
-async def main():
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling(bot)
-    except Exception as e:
-        await log_error(f"Помилка при запуску бота: {e}")
-
-if __name__ == "__main__":
-    asyncio.run(main())
