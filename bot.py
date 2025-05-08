@@ -139,6 +139,18 @@ async def cmd_start(message: types.Message):
     except Exception as e:
         await log_error(f"Помилка при старті: {e}")
 
+@dp.message(F.text == "Умови співпраці")
+async def handle_terms(message: types.Message):
+    await message.answer("Наші умови співпраці: \n- Доставка по Україні\n- Оплата онлайн або при отриманні\n- Обмін/повернення протягом 14 днів.")
+
+@dp.message(F.text == "Новинки")
+async def handle_new_products(message: types.Message):
+    await message.answer("Наразі немає новинок. Слідкуйте за оновленнями!")
+
+@dp.message(F.text == "Підписатися на розсилку")
+async def handle_subscribe(message: types.Message):
+    await message.answer("Ви успішно підписані на розсилку!")
+
 async def main():
     await dp.start_polling(bot)
 
