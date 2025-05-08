@@ -147,6 +147,17 @@ async def handle_terms(message: types.Message):
 async def handle_new_products(message: types.Message):
     await message.answer("Наразі немає новинок. Слідкуйте за оновленнями!")
 
+@dp.message(F.text == "Питання оператору")
+async def handle_operator_question(message: types.Message):
+    await message.answer("Напишіть ваше питання оператору, і ми відповімо якнайшвидше.")
+    await OperatorQuestion.waiting_for_question.set()
+
+@dp.message(OperatorQuestion.waiting_for_question)
+async def process_operator_question(message: types.Message, state: FSMContext):
+    await bot.send_message(ADMIN_ID, f"Питання від користувача {message.from_user.id}: {message.text}")
+    await message.answer("Ваше питання надіслано оператору. Дякуємо за звернення!")
+    await state.clear()
+
 @dp.message(F.text == "Підписатися на розсилку")
 async def handle_subscribe(message: types.Message):
     await message.answer("Ви успішно підписані на розсилку!")
