@@ -86,6 +86,7 @@ class SendNews(StatesGroup):
 
 class OperatorQuestion(StatesGroup):
     waiting_for_question = State()
+    waiting_for_reply = State()
 
 async def log_error(error_message):
     try:
