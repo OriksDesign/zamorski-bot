@@ -30,7 +30,8 @@ class DatabaseConnection:
                 password=self.password,
                 database=self.database,
                 charset='utf8mb4',
-                cursorclass=pymysql.cursors.DictCursor
+                cursorclass=pymysql.cursors.DictCursor,
+                autocommit=True
             )
             print("✅ Database connection successful")
         except pymysql.MySQLError as e:
@@ -62,10 +63,8 @@ class DatabaseConnection:
             print(f"❌ Database close failed: {e}")
 
 # Ініціалізація з'єднання з базою даних
-db = DatabaseConnection()
-
-# Створення таблиці, якщо не існує
 try:
+    db = DatabaseConnection()
     with db.get_cursor() as cursor:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS subscribers (
@@ -74,7 +73,6 @@ try:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         ''')
-        db.commit()
         print("✅ Subscribers table ready")
 except Exception as e:
     print(f"❌ Failed to create subscribers table: {e}")
@@ -153,8 +151,7 @@ async def ask_operator(message: types.Message, state: FSMContext):
 async def forward_question(message: types.Message, state: FSMContext):
     try:
         print(f"✅ Forwarding question from {message.from_user.id}")
-        await bot.send_message(ADMIN_ID, f"Питання від користувача {message.from_user.id}:
-{message.text}")
+        await bot.send_message(ADMIN_ID, f"Питання від користувача {message.from_user.id}:\n{message.text}")
         await message.answer("Ваше питання надіслано оператору!")
         await state.clear()
     except Exception as e:
