@@ -150,7 +150,7 @@ async def handle_new_products(message: types.Message):
 @dp.message(F.text == "Питання оператору")
 async def handle_operator_question(message: types.Message, state: FSMContext):
     await message.answer("Напишіть ваше питання оператору, і ми відповімо якнайшвидше.")
-    await OperatorQuestion.waiting_for_question.set()
+    await state.set_state(OperatorQuestion.waiting_for_question)
 
 @dp.message(OperatorQuestion.waiting_for_question)
 async def process_operator_question(message: types.Message, state: FSMContext):
