@@ -156,3 +156,9 @@ async def forward_question(message: types.Message, state: FSMContext):
         await state.clear()
     except Exception as e:
         await log_error(f"Помилка при надсиланні питання оператору: {e}")
+
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
