@@ -13,25 +13,33 @@ API_TOKEN = os.getenv('API_TOKEN')
 ADMIN_ID = int(os.getenv('ADMIN_ID'))
 
 # Підключення до бази даних через pymysql
-connection = pymysql.connect(
-    host=os.getenv('DB_HOST'),
-    user=os.getenv('DB_USER'),
-    password=os.getenv('DB_PASSWORD'),
-    database=os.getenv('DB_NAME'),
-    charset='utf8mb4',
-    cursorclass=pymysql.cursors.DictCursor
-)
+try:
+    connection = pymysql.connect(
+        host=os.getenv('DB_HOST'),
+        user=os.getenv('DB_USER'),
+        password=os.getenv('DB_PASSWORD'),
+        database=os.getenv('DB_NAME'),
+        charset='utf8mb4',
+        cursorclass=pymysql.cursors.DictCursor
+    )
+    print("✅ Database connection successful")
+except pymysql.MySQLError as e:
+    print(f"❌ Database connection failed: {e}")
 
 # Створення таблиці, якщо не існує
-with connection.cursor() as cursor:
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS subscribers (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            user_id BIGINT NOT NULL UNIQUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    ''')
-connection.commit()
+try:
+    with connection.cursor() as cursor:
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS subscribers (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id BIGINT NOT NULL UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        ''')
+    connection.commit()
+    print("✅ Subscribers table ready")
+except pymysql.MySQLError as e:
+    print(f"❌ Failed to create subscribers table: {e}")
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
@@ -41,9 +49,7 @@ class SendNews(StatesGroup):
     waiting_for_caption = State()
 
 class OperatorQuestion(StatesGroup):
-    waiting_for_choice = State()
-    waiting_for_text = State()
-    waiting_for_payment = State()
+    waiting_for_question = State()
 
 async def log_error(error_message):
     try:
@@ -70,6 +76,7 @@ def get_main_keyboard(user_id):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     try:
+        print(f"✅ Start command received from {message.from_user.id}")
         save_user(message.from_user.id)
         await message.answer("Вітаємо у магазині Заморські подарунки! Оберіть, будь ласка:", reply_markup=get_main_keyboard(message.from_user.id))
     except Exception as e:
@@ -78,6 +85,7 @@ async def cmd_start(message: types.Message):
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     try:
+        print(f"✅ Help command received from {message.from_user.id}")
         await message.answer("""\n/start – Почати спілкування\n/help – Як працює бот\n/sendnews – Для адміністратора (розсилка)\n""", reply_markup=get_main_keyboard(message.from_user.id))
     except Exception as e:
         await log_error(f"Помилка при виклику /help: {e}")
@@ -85,6 +93,7 @@ async def cmd_help(message: types.Message):
 @dp.message(F.text == "Підписатися на розсилку")
 async def subscribe_user(message: types.Message):
     try:
+        print(f"✅ Subscribe command received from {message.from_user.id}")
         if is_user_saved(message.from_user.id):
             await message.answer("Ви вже підписані на розсилку!", reply_markup=get_main_keyboard(message.from_user.id))
         else:
@@ -92,6 +101,26 @@ async def subscribe_user(message: types.Message):
             await message.answer("Ви успішно підписалися на розсилку!", reply_markup=get_main_keyboard(message.from_user.id))
     except Exception as e:
         await log_error(f"Помилка при підписці: {e}")
+
+@dp.message(F.text == "Питання оператору")
+async def ask_operator(message: types.Message, state: FSMContext):
+    try:
+        print(f"✅ Operator question initiated by {message.from_user.id}")
+        await message.answer("Введіть ваше питання:")
+        await state.set_state(OperatorQuestion.waiting_for_question)
+    except Exception as e:
+        await log_error(f"Помилка при початку питання оператору: {e}")
+
+@dp.message(OperatorQuestion.waiting_for_question)
+async def forward_question(message: types.Message, state: FSMContext):
+    try:
+        print(f"✅ Forwarding question from {message.from_user.id}")
+        await bot.send_message(ADMIN_ID, f"Питання від користувача {message.from_user.id}:
+{message.text}")
+        await message.answer("Ваше питання надіслано оператору!")
+        await state.clear()
+    except Exception as e:
+        await log_error(f"Помилка при надсиланні питання оператору: {e}")
 
 
 def save_user(user_id):
