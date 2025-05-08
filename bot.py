@@ -94,6 +94,27 @@ async def log_error(error_message):
         print(f"Не вдалося надіслати повідомлення про помилку адміну: {e}")
 
 
+def save_user(user_id):
+    try:
+        with db.get_cursor() as cursor:
+            cursor.execute("INSERT INTO subscribers (user_id) VALUES (%s) ON DUPLICATE KEY UPDATE user_id = user_id", (user_id,))
+            db.commit()
+            print(f"✅ User {user_id} saved")
+    except Exception as e:
+        print(f"❌ Failed to save user {user_id}: {e}")
+
+
+def is_user_saved(user_id):
+    try:
+        with db.get_cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) as count FROM subscribers WHERE user_id = %s", (user_id,))
+            result = cursor.fetchone()
+            return result['count'] > 0
+    except Exception as e:
+        print(f"❌ Failed to check if user {user_id} is saved: {e}")
+        return False
+
+
 def get_main_keyboard(user_id):
     buttons = [
         [types.KeyboardButton(text="Умови співпраці")],
@@ -117,45 +138,6 @@ async def cmd_start(message: types.Message):
         await message.answer("Вітаємо у магазині Заморські подарунки! Оберіть, будь ласка:", reply_markup=get_main_keyboard(message.from_user.id))
     except Exception as e:
         await log_error(f"Помилка при старті: {e}")
-
-@dp.message(Command("help"))
-async def cmd_help(message: types.Message):
-    try:
-        print(f"✅ Help command received from {message.from_user.id}")
-        await message.answer("""\n/start – Почати спілкування\n/help – Як працює бот\n/sendnews – Для адміністратора (розсилка)\n""", reply_markup=get_main_keyboard(message.from_user.id))
-    except Exception as e:
-        await log_error(f"Помилка при виклику /help: {e}")
-
-@dp.message(F.text == "Підписатися на розсилку")
-async def subscribe_user(message: types.Message):
-    try:
-        print(f"✅ Subscribe command received from {message.from_user.id}")
-        if is_user_saved(message.from_user.id):
-            await message.answer("Ви вже підписані на розсилку!", reply_markup=get_main_keyboard(message.from_user.id))
-        else:
-            save_user(message.from_user.id)
-            await message.answer("Ви успішно підписалися на розсилку!", reply_markup=get_main_keyboard(message.from_user.id))
-    except Exception as e:
-        await log_error(f"Помилка при підписці: {e}")
-
-@dp.message(F.text == "Питання оператору")
-async def ask_operator(message: types.Message, state: FSMContext):
-    try:
-        print(f"✅ Operator question initiated by {message.from_user.id}")
-        await message.answer("Введіть ваше питання:")
-        await state.set_state(OperatorQuestion.waiting_for_question)
-    except Exception as e:
-        await log_error(f"Помилка при початку питання оператору: {e}")
-
-@dp.message(OperatorQuestion.waiting_for_question)
-async def forward_question(message: types.Message, state: FSMContext):
-    try:
-        print(f"✅ Forwarding question from {message.from_user.id}")
-        await bot.send_message(ADMIN_ID, f"Питання від користувача {message.from_user.id}:\n{message.text}")
-        await message.answer("Ваше питання надіслано оператору!")
-        await state.clear()
-    except Exception as e:
-        await log_error(f"Помилка при надсиланні питання оператору: {e}")
 
 async def main():
     await dp.start_polling(bot)
