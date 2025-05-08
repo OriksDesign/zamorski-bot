@@ -134,7 +134,8 @@ def get_main_keyboard(user_id):
 async def cmd_start(message: types.Message):
     try:
         print(f"✅ Start command received from {message.from_user.id}")
-        save_user(message.from_user.id)
+        if not is_user_saved(message.from_user.id):
+            save_user(message.from_user.id)
         await message.answer("Вітаємо у магазині Заморські подарунки! Оберіть, будь ласка:", reply_markup=get_main_keyboard(message.from_user.id))
     except Exception as e:
         await log_error(f"Помилка при старті: {e}")
