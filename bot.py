@@ -1,4 +1,3 @@
-## bot.py
 import os
 import asyncio
 import logging
@@ -13,6 +12,8 @@ from aiogram.types import (
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
 # ---------------------------------------------------------------------------
 # Конфігурація
@@ -138,7 +139,7 @@ class OperatorQuestion(StatesGroup):
 # ---------------------------------------------------------------------------
 # Бот і диспетчер
 # ---------------------------------------------------------------------------
-bot = Bot(token=API_TOKEN, parse_mode="HTML")
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 
@@ -247,7 +248,7 @@ async def got_question(message: types.Message, state: FSMContext):
 
 # Адмін відповідає, просто натиснувши reply на повідомлення бота з UID
 @dp.message(F.from_user.id == ADMIN_ID)
-async def admin_router(message: types.Message):
+async def admin_router(message: types.Message, state: FSMContext):
     # Відповідь на конкретний тред
     if message.reply_to_message and message.reply_to_message.message_id:
         # Знайдемо тред по admin_message_id
@@ -277,7 +278,7 @@ async def admin_router(message: types.Message):
     # Інші адмінські дії
     if message.text == "Зробити розсилку":
         await message.answer("Надішліть текст або фото з підписом для розсилки.")
-        await dp.fsm.set_state(message.chat.id, SendBroadcast.waiting_content)
+        await state.set_state(SendBroadcast.waiting_content)
 
 
 # Хендлери стану розсилки
