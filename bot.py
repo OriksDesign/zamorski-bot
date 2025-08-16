@@ -6,19 +6,18 @@ from typing import Optional, List
 import pymysql
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
-from aiogram.types import (
-    KeyboardButton, ReplyKeyboardMarkup,
-)
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-# ---------------------------------------------------------------------------
-# Конфігурація
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Конфігурація з оточення
+# ----------------------------------------------------------------------------
 API_TOKEN = os.getenv("API_TOKEN")
+
 # Підтримка одного або кількох адміністраторів
 ADMIN_IDS = set()
 _admin_single = os.getenv("ADMIN_ID", "").strip()
@@ -27,15 +26,15 @@ if _admin_single:
         ADMIN_IDS.add(int(_admin_single))
     except ValueError:
         pass
-_admin_many = os.getenv("ADMIN_IDS", "").split(",")
-for _p in _admin_many:
-    _p = _p.strip()
-    if _p:
+for part in os.getenv("ADMIN_IDS", "").split(","):
+    part = part.strip()
+    if part:
         try:
-            ADMIN_IDS.add(int(_p))
+            ADMIN_IDS.add(int(part))
         except ValueError:
             pass
 
+# Перший адмін для системних повідомлень (reply-треди)
 ADMIN_ID_PRIMARY = next(iter(ADMIN_IDS), None)
 
 if not API_TOKEN:
@@ -43,18 +42,17 @@ if not API_TOKEN:
 if not ADMIN_IDS:
     raise RuntimeError("Не задано ADMIN_ID або ADMIN_IDS у змінних середовища")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("zamorski-bot")
+
 
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
 
-# ---------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
 # Підключення до MySQL з авто‑перепідключенням
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 class MySQL:
     def __init__(self):
         self.host = os.getenv("DB_HOST")
@@ -122,9 +120,10 @@ with db.cursor() as cur:
         """
     )
 
-# ---------------------------------------------------------------------------
-# Допоміжні функції для БД
-# ---------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# БД-хелпери
+# ----------------------------------------------------------------------------
 
 def add_subscriber(user_id: int) -> None:
     with db.cursor() as cur:
@@ -145,9 +144,9 @@ def remove_subscriber(user_id: int) -> None:
         cur.execute("DELETE FROM subscribers WHERE user_id=%s", (user_id,))
 
 
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # FSM стани
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 class SendBroadcast(StatesGroup):
     waiting_content = State()
 
@@ -156,9 +155,9 @@ class OperatorQuestion(StatesGroup):
     waiting_text = State()
 
 
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Бот і диспетчер
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
@@ -185,9 +184,9 @@ async def notify_admin(text: str):
             logger.warning(f"Не вдалося надіслати адміну {aid}: {e}")
 
 
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Команди та обробники
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 @dp.message(CommandStart())
 async def start(message: types.Message):
     add_subscriber(message.from_user.id)
@@ -204,10 +203,9 @@ async def menu(message: types.Message):
 
 @dp.message(Command("whoami"))
 async def whoami(message: types.Message):
-status = "так" if is_admin(message.from_user.id) else "ні"
-text = (f"Ваш user_id: <code>{message.from_user.id}</code>\n"
-f"Адмін: {status}")
-await message.answer(text)
+    await message.answer(
+        f"Ваш user_id: <code>{message.from_user.id}</code>\nАдмін: {'так' if is_admin(message.from_user.id) else 'ні'}"
+    )
 
 
 @dp.message(F.text == "Умови співпраці")
@@ -225,9 +223,7 @@ async def terms(message: types.Message):
 @dp.message(F.text == "Новинки")
 async def news(message: types.Message):
     kb = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [types.InlineKeyboardButton(text="Відкрити сайт", url="https://zamorskiepodarki.com/uk")]
-        ]
+        inline_keyboard=[[types.InlineKeyboardButton(text="Відкрити сайт", url="https://zamorskiepodarki.com/uk")]]
     )
     await message.answer("Слідкуйте за новинками на нашому сайті.", reply_markup=kb)
 
@@ -250,7 +246,7 @@ async def got_question(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     text = message.text or ""
 
-    # Сохраняємо тред і форвардимо адміну
+    # Зберігаємо тред і форвардимо адміну
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO operator_threads (user_id, question) VALUES (%s, %s)",
@@ -264,7 +260,7 @@ async def got_question(message: types.Message, state: FSMContext):
     )
     sent = await bot.send_message(ADMIN_ID_PRIMARY, note)
 
-    # Запишемо message_id для зв'язки відповіді по reply
+    # Прив’язуємо admin_message_id для відповіді
     with db.cursor() as cur:
         cur.execute(
             "UPDATE operator_threads SET admin_message_id=%s WHERE id=%s",
@@ -275,12 +271,11 @@ async def got_question(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# Адмін відповідає, просто натиснувши reply на повідомлення бота з UID
+# Адмін відповідає, роблячи reply на повідомлення з питанням
 @dp.message(F.from_user.id.in_(list(ADMIN_IDS)))
 async def admin_router(message: types.Message, state: FSMContext):
     # Відповідь на конкретний тред
     if message.reply_to_message and message.reply_to_message.message_id:
-        # Знайдемо тред по admin_message_id
         admin_msg_id = message.reply_to_message.message_id
         with db.cursor() as cur:
             cur.execute(
@@ -310,7 +305,7 @@ async def admin_router(message: types.Message, state: FSMContext):
         await state.set_state(SendBroadcast.waiting_content)
 
 
-# Хендлери стану розсилки
+# ------------------------- Розсилка --------------------------------------
 @dp.message(SendBroadcast.waiting_content, F.from_user.id.in_(list(ADMIN_IDS)), F.photo)
 async def broadcast_photo(message: types.Message, state: FSMContext):
     await do_broadcast(photo_id=message.photo[-1].file_id, caption=message.caption or "")
@@ -348,9 +343,9 @@ async def do_broadcast(text: str = "", photo_id: Optional[str] = None, caption: 
     await notify_admin(f"Розсилка завершена. Успішно: {ok}, видалено зі списку: {blocked}.")
 
 
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Точка входу
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 async def main():
     try:
         await dp.start_polling(bot)
@@ -360,5 +355,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
