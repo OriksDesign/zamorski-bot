@@ -205,7 +205,9 @@ async def menu(message: types.Message):
 @dp.message(Command("whoami"))
 async def whoami(message: types.Message):
 status = "так" if is_admin(message.from_user.id) else "ні"
-await message.answer(f"Ваш user_id: <code>{message.from_user.id}</code>\nАдмін: {status}")
+text = (f"Ваш user_id: <code>{message.from_user.id}</code>\n"
+f"Адмін: {status}")
+await message.answer(text)
 
 
 @dp.message(F.text == "Умови співпраці")
@@ -358,4 +360,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
