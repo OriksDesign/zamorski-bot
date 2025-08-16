@@ -36,6 +36,8 @@ for _p in _admin_many:
         except ValueError:
             pass
 
+ADMIN_ID_PRIMARY = next(iter(ADMIN_IDS), None)
+
 if not API_TOKEN:
     raise RuntimeError("Не задано API_TOKEN у змінних середовища")
 if not ADMIN_IDS:
@@ -176,10 +178,11 @@ def main_kb(user_id: int) -> ReplyKeyboardMarkup:
 
 
 async def notify_admin(text: str):
-    try:
-        await bot.send_message(ADMIN_ID, text)
-    except Exception as e:
-        logger.warning(f"Не вдалося надіслати адміну: {e}")
+    for aid in ADMIN_IDS:
+        try:
+            await bot.send_message(aid, text)
+        except Exception as e:
+            logger.warning(f"Не вдалося надіслати адміну {aid}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +205,7 @@ async def menu(message: types.Message):
 @dp.message(Command("whoami"))
 async def whoami(message: types.Message):
     await message.answer(f"Ваш user_id: <code>{message.from_user.id}</code>
-Адмін: {"так" if is_admin(message.from_user.id) else "ні"}")
+Адмін: {'так' if is_admin(message.from_user.id) else 'ні'}") else "ні"}")
 
 
 @dp.message(F.text == "Умови співпраці")
@@ -257,7 +260,7 @@ async def got_question(message: types.Message, state: FSMContext):
         f"Питання від користувача <code>{user_id}</code>\n"
         f"Thread #{thread_id}\n\n{text}"
     )
-    sent = await bot.send_message(ADMIN_ID, note)
+    sent = await bot.send_message(ADMIN_ID_PRIMARY, note)
 
     # Запишемо message_id для зв'язки відповіді по reply
     with db.cursor() as cur:
@@ -306,13 +309,13 @@ async def admin_router(message: types.Message, state: FSMContext):
 
 
 # Хендлери стану розсилки
-@dp.message(SendBroadcast.waiting_content, F.from_user.id == ADMIN_ID, F.photo)
+@dp.message(SendBroadcast.waiting_content, F.from_user.id.in_(list(ADMIN_IDS)), F.photo)
 async def broadcast_photo(message: types.Message, state: FSMContext):
     await do_broadcast(photo_id=message.photo[-1].file_id, caption=message.caption or "")
     await state.clear()
 
 
-@dp.message(SendBroadcast.waiting_content, F.from_user.id == ADMIN_ID)
+@dp.message(SendBroadcast.waiting_content, F.from_user.id.in_(list(ADMIN_IDS)))
 async def broadcast_text(message: types.Message, state: FSMContext):
     await do_broadcast(text=message.text or "")
     await state.clear()
@@ -340,7 +343,7 @@ async def do_broadcast(text: str = "", photo_id: Optional[str] = None, caption: 
             logger.warning(f"Broadcast to {uid} failed: {e}")
         await asyncio.sleep(0.05)  # анти-флуд
 
-    await bot.send_message(ADMIN_ID, f"Розсилка завершена. Успішно: {ok}, видалено зі списку: {blocked}.")
+    await notify_admin(f"Розсилка завершена. Успішно: {ok}, видалено зі списку: {blocked}.")
 
 
 # ---------------------------------------------------------------------------
