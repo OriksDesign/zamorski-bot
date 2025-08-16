@@ -19,18 +19,36 @@ from aiogram.enums import ParseMode
 # Конфігурація
 # ---------------------------------------------------------------------------
 API_TOKEN = os.getenv("API_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+# Підтримка одного або кількох адміністраторів
+ADMIN_IDS = set()
+_admin_single = os.getenv("ADMIN_ID", "").strip()
+if _admin_single:
+    try:
+        ADMIN_IDS.add(int(_admin_single))
+    except ValueError:
+        pass
+_admin_many = os.getenv("ADMIN_IDS", "").split(",")
+for _p in _admin_many:
+    _p = _p.strip()
+    if _p:
+        try:
+            ADMIN_IDS.add(int(_p))
+        except ValueError:
+            pass
 
 if not API_TOKEN:
     raise RuntimeError("Не задано API_TOKEN у змінних середовища")
-if not ADMIN_ID:
-    raise RuntimeError("Не задано ADMIN_ID у змінних середовища")
+if not ADMIN_IDS:
+    raise RuntimeError("Не задано ADMIN_ID або ADMIN_IDS у змінних середовища")
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("zamorski-bot")
+
+def is_admin(uid: int) -> bool:
+    return uid in ADMIN_IDS
 
 # ---------------------------------------------------------------------------
 # Підключення до MySQL з авто‑перепідключенням
@@ -152,7 +170,7 @@ def main_kb(user_id: int) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="Новинки")],
         [KeyboardButton(text="Підписатися на розсилку")],
     ]
-    if user_id == ADMIN_ID:
+    if is_admin(user_id):
         rows.append([KeyboardButton(text="Зробити розсилку")])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
@@ -179,6 +197,12 @@ async def start(message: types.Message):
 @dp.message(Command("menu"))
 async def menu(message: types.Message):
     await message.answer("Головне меню", reply_markup=main_kb(message.from_user.id))
+
+
+@dp.message(Command("whoami"))
+async def whoami(message: types.Message):
+    await message.answer(f"Ваш user_id: <code>{message.from_user.id}</code>
+Адмін: {"так" if is_admin(message.from_user.id) else "ні"}")
 
 
 @dp.message(F.text == "Умови співпраці")
@@ -247,7 +271,7 @@ async def got_question(message: types.Message, state: FSMContext):
 
 
 # Адмін відповідає, просто натиснувши reply на повідомлення бота з UID
-@dp.message(F.from_user.id == ADMIN_ID)
+@dp.message(F.from_user.id.in_(list(ADMIN_IDS)))
 async def admin_router(message: types.Message, state: FSMContext):
     # Відповідь на конкретний тред
     if message.reply_to_message and message.reply_to_message.message_id:
