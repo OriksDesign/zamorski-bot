@@ -1,10 +1,10 @@
-# bot_ru.py
+# bot.py
 # -*- coding: utf-8 -*-
 # Телеграм-бот для подготовки поста «Новое поступление» и удобной замены позиций местами.
 # Требуется python-telegram-bot >= 20.0
 # 1) Установить: pip install python-telegram-bot==21.4
 # 2) Заменить значения в секции НАСТРОЙКИ ниже.
-# 3) Запуск: python bot_ru.py
+# 3) Запуск: python bot.py
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from telegram.ext import (
     filters,
 )
 
-# ------------------------- НАСТРОЙКИ -------------------------
+# ----------------------- НАЛАШТУВАННЯ -----------------------
 import os
 
 def _env(name, *alts, default=None):
@@ -37,29 +37,19 @@ def _env(name, *alts, default=None):
             return v
     return default
 
-# Токен бота: в Render ключ API_TOKEN (або TELEGRAM_TOKEN як альтернатива)
 TOKEN = _env("API_TOKEN", "TELEGRAM_TOKEN")
-
-# ID каналу/чату, куди постимо новинки: створи ключ CHANNEL_ID у Render
-# Для каналу це зазвичай від'ємне число типу -1001234567890
 CHANNEL_ID = int(_env("CHANNEL_ID", "TARGET_CHAT_ID", "CHAT_ID", default="0"))
-
-# Адміни: у Render ключ ADMIN_ID. Може бути один ID або список через кому.
 _admin_raw = _env("ADMIN_ID", "ADMIN_IDS", default="")
 ADMIN_IDS = {int(x) for x in _admin_raw.replace(" ", "").split(",") if x}
-
-# Лінк на розділ новинок
 NEW_ARRIVALS_URL = _env(
     "NEW_ARRIVALS_URL",
     default="https://zamorskiepodarki.com/uk/novoe-postuplenie/"
 )
 
 if not TOKEN or CHANNEL_ID == 0 or not ADMIN_IDS:
-    raise SystemExit(
-        "Не задані API_TOKEN або CHANNEL_ID або ADMIN_ID. "
-        "Додай ці ключі у Render Environment Variables."
-    )
-# -------------------------------------------------------------
+    raise SystemExit("Не задані API_TOKEN або CHANNEL_ID або ADMIN_ID у Render.")
+# ------------------------------------------------------------
+
 
 
 
@@ -403,4 +393,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
