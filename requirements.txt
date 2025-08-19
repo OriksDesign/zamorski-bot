@@ -1,2 +1,3 @@
 aiogram>=3.6,<4.0
 pymysql>=1.1
+python-telegram-bot==21.4
