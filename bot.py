@@ -32,8 +32,14 @@ NEW_ARRIVALS_URL = _env(
     default="https://zamorskiepodarki.com/uk/novoe-postuplenie/"
 )
 
-if not TOKEN or CHANNEL_ID == 0 or not ADMIN_IDS:
-    raise SystemExit("Не задані API_TOKEN або CHANNEL_ID або ADMIN_ID у Render.")
+missing = []
+if not TOKEN:
+    missing.append("API_TOKEN")
+if not ADMIN_IDS:
+    missing.append("ADMIN_ID")
+if missing:
+    raise SystemExit("Не задані " + ", ".join(missing) + " у Render.")
+# CHANNEL_ID може бути 0 — тоді /publish просто попередить
 # ------------------------------------------------------------
 
 logging.basicConfig(
@@ -342,3 +348,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
