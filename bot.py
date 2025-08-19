@@ -26,15 +26,6 @@ from aiogram.enums import ParseMode
 
 API_TOKEN = os.getenv("API_TOKEN", "").strip()
 
-# Реквізити для шаблону рахунку (ENV)
-BILL_IBAN = os.getenv("BILL_IBAN", "").strip()              # обов'язково
-BILL_RECIPIENT = os.getenv("BILL_RECIPIENT", "").strip()    # обов'язково
-BILL_BANK = os.getenv("BILL_BANK", "").strip()              # опційно
-BILL_PURPOSE_TEMPLATE = os.getenv(
-    "BILL_PURPOSE_TEMPLATE",
-    "Оплата замовлення {order_no}; ПІБ: {name}",
-).strip()
-
 # Підтримка одного або кількох адміністраторів
 ADMIN_IDS: set[int] = set()
 _single = os.getenv("ADMIN_ID", "").strip()
@@ -201,7 +192,7 @@ def user_kb() -> ReplyKeyboardMarkup:
     )
 
 def admin_kb() -> ReplyKeyboardRemove:
-    # Адміну ховаємо клавіатуру, все робиться через reply/кнопки під службовими повідомленнями
+    # Адміну ховаємо клавіатуру — все робиться через reply
     return ReplyKeyboardRemove()
 
 def main_kb(user_id: int):
@@ -211,32 +202,11 @@ def tracking_kb(ttn: str) -> InlineKeyboardMarkup:
     url = f"https://tracking.novaposhta.ua/#/uk/parcel/tracking/{ttn}"
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Відстежити ТТН", url=url)]])
 
-def bill_admin_kb(thread_id: int) -> InlineKeyboardMarkup:
-    # Кнопка для миттєвого надсилання шаблону рахунку
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📄 Надіслати шаблон рахунку", callback_data=f"bill_tpl:{thread_id}")]
-        ]
-    )
-
 def extract_ttn(text: Optional[str]) -> Optional[str]:
     if not text:
         return None
     m = re.search(r"\b\d{14}\b", text)
     return m.group(0) if m else None
-
-def render_bill_template(name: str, order_no: str) -> str:
-    """Формує текст рахунку за ENV-реквізитами."""
-    parts = [
-        "Реквізити для оплати:",
-        f"IBAN: <code>{BILL_IBAN or '—'}</code>",
-        f"Отримувач: {BILL_RECIPIENT or '—'}",
-    ]
-    if BILL_BANK:
-        parts.append(f"Банк: {BILL_BANK}")
-    purpose = BILL_PURPOSE_TEMPLATE.format(order_no=order_no, name=name)
-    parts.append(f"Призначення платежу: {purpose}")
-    return "\n".join(parts)
 
 
 async def notify_admin(text: str):
@@ -281,13 +251,53 @@ async def terms(message: types.Message):
     await message.answer(text, reply_markup=main_kb(message.from_user.id))
 
 
-# ------------------------- Питання оператору/ТТН/Рахунок -------------------
+# ------------------------- Питання оператору -------------------------------
 
 @dp.message(F.text == "Питання оператору")
 async def ask_operator_generic(message: types.Message, state: FSMContext):
     await state.update_data(topic="Загальне")
     await message.answer("Напишіть ваше питання. Ми відповімо якнайшвидше.")
     await state.set_state(OperatorQuestion.waiting_text)
+
+@dp.message(OperatorQuestion.waiting_text)
+async def got_question(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    text = message.text or ""
+    data = await state.get_data()
+    topic = data.get("topic", "Загальне")
+
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO operator_threads (user_id, question) VALUES (%s, %s)",
+            (user_id, f"[Тема: {topic}]\n{text}"),
+        )
+        thread_id = cur.lastrowid
+
+    note = (
+        f"Питання від користувача <code>{user_id}</code>\n"
+        f"Тема: <b>{topic}</b>\n"
+        f"Thread #{thread_id}\n\n{text}"
+    )
+    sent = await bot.send_message(
+        ADMIN_ID_PRIMARY,
+        note,
+        reply_markup=ForceReply(input_field_placeholder="Напишіть відповідь користувачу…"),
+    )
+
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE operator_threads SET admin_message_id=%s WHERE id=%s",
+            (sent.message_id, thread_id),
+        )
+
+    await message.answer(
+        "Ваше питання надіслано оператору. Дякуємо за звернення.",
+        reply_markup=user_kb(),
+    )
+    await state.clear()
+
+
+# --------------------- Запит ТТН (2 кроки: ПІБ -> № замовлення) ------------
 
 @dp.message(F.text == "Запитати ТТН Нової пошти")
 async def ttn_start(message: types.Message, state: FSMContext):
@@ -317,23 +327,29 @@ async def ttn_got_order(message: types.Message, state: FSMContext):
     note = (
         f"Запит ТТН від користувача <code>{user_id}</code>\n"
         f"ПІБ: <b>{name}</b>\nЗамовлення: <b>{order_no}</b>\n"
-        f"Thread #{thread_id}\n\nВідповідайте номером ТТН (14 цифр) або текстом."
+        f"Thread #{thread_id}\n\n"
+        f"Відповідайте номером ТТН (14 цифр) або текстом."
     )
     sent = await bot.send_message(
-        ADMIN_ID_PRIMARY, note,
+        ADMIN_ID_PRIMARY,
+        note,
         reply_markup=ForceReply(input_field_placeholder="Введіть ТТН або відповідь…"),
     )
 
     with db.cursor() as cur:
-        cur.execute("UPDATE operator_threads SET admin_message_id=%s WHERE id=%s",
-                    (sent.message_id, thread_id))
+        cur.execute(
+            "UPDATE operator_threads SET admin_message_id=%s WHERE id=%s",
+            (sent.message_id, thread_id),
+        )
 
-    await message.answer("Дякуємо! Ми перевіримо ТТН і надішлемо вам відповідь.",
-                         reply_markup=user_kb())
+    await message.answer(
+        "Дякуємо! Ми перевіримо ТТН і надішлемо вам відповідь.",
+        reply_markup=user_kb(),
+    )
     await state.clear()
 
 
-# --- Запит рахунку (2 кроки): ПІБ -> № замовлення + кнопка 'Надіслати шаблон рахунку'
+# --------- Запит рахунку (2 кроки: ПІБ -> № замовлення; без шаблонів) ------
 
 @dp.message(F.text == "Запитати рахунок для сплати замовлення")
 async def bill_start(message: types.Message, state: FSMContext):
@@ -364,23 +380,28 @@ async def bill_got_order(message: types.Message, state: FSMContext):
         f"Запит РАХУНКУ від користувача <code>{user_id}</code>\n"
         f"ПІБ: <b>{name}</b>\nЗамовлення: <b>{order_no}</b>\n"
         f"Thread #{thread_id}\n\n"
-        f"Кнопка нижче: миттєво надіслати шаблон рахунку."
+        f"Відповідайте реквізитами/рахунком у цьому Reply."
     )
     sent = await bot.send_message(
-        ADMIN_ID_PRIMARY, note,
-        reply_markup=bill_admin_kb(thread_id),
+        ADMIN_ID_PRIMARY,
+        note,
+        reply_markup=ForceReply(input_field_placeholder="Надішліть реквізити/рахунок…"),
     )
 
     with db.cursor() as cur:
-        cur.execute("UPDATE operator_threads SET admin_message_id=%s WHERE id=%s",
-                    (sent.message_id, thread_id))
+        cur.execute(
+            "UPDATE operator_threads SET admin_message_id=%s WHERE id=%s",
+            (sent.message_id, thread_id),
+        )
 
-    await message.answer("Дякуємо! Надішлемо вам реквізити для оплати.",
-                         reply_markup=user_kb())
+    await message.answer(
+        "Дякуємо! Надішлемо вам реквізити для оплати.",
+        reply_markup=user_kb(),
+    )
     await state.clear()
 
 
-# ----------------------- Відповіді адміна / Callback-и ----------------------
+# ---------------------------- Відповідь адміна -----------------------------
 
 @dp.message()
 async def admin_router(message: types.Message, state: FSMContext):
@@ -401,17 +422,24 @@ async def admin_router(message: types.Message, state: FSMContext):
         if row:
             uid = int(row["user_id"])
             try:
-                # Якщо ТТН в тексті — відправляємо з кнопкою відстеження
+                # Якщо ТТН у відповіді — відправляємо з кнопкою відстеження
                 ttn = extract_ttn(message.text or message.caption or "")
                 if ttn:
-                    await bot.send_message(uid, f"Ваша ТТН Нової пошти: <code>{ttn}</code>",
-                                           reply_markup=tracking_kb(ttn))
-                    await bot.send_message(uid, "Якщо потрібна додаткова інформація — напишіть нам 😊",
-                                           reply_markup=user_kb())
+                    await bot.send_message(
+                        uid, f"Ваша ТТН Нової пошти: <code>{ttn}</code>",
+                        reply_markup=tracking_kb(ttn),
+                    )
+                    await bot.send_message(
+                        uid, "Якщо потрібна додаткова інформація — напишіть нам 😊",
+                        reply_markup=user_kb(),
+                    )
                 else:
                     if message.photo:
-                        await bot.send_photo(uid, message.photo[-1].file_id,
-                                             caption=message.caption or "", reply_markup=user_kb())
+                        await bot.send_photo(
+                            uid, message.photo[-1].file_id,
+                            caption=message.caption or "",
+                            reply_markup=user_kb(),
+                        )
                     else:
                         await bot.send_message(uid, message.text or "", reply_markup=user_kb())
                 await message.reply("Надіслано користувачу")
@@ -442,57 +470,6 @@ async def admin_router(message: types.Message, state: FSMContext):
             except Exception as e:
                 await message.reply(f"Помилка відправки: {e}")
             return
-
-
-# --- callback: надіслати шаблон рахунку (адмінська кнопка під запитом BILL)
-@dp.callback_query(F.data.startswith("bill_tpl:"))
-async def on_bill_template(cb: types.CallbackQuery):
-    if not is_admin(cb.from_user.id):
-        await cb.answer("Недостатньо прав", show_alert=True)
-        return
-
-    try:
-        thread_id = int(cb.data.split(":")[1])
-    except Exception:
-        await cb.answer("Помилка ідентифікатора", show_alert=True)
-        return
-
-    # Дістаємо користувача + вихідні дані з question
-    with db.cursor() as cur:
-        cur.execute("SELECT user_id, question FROM operator_threads WHERE id=%s", (thread_id,))
-        row = cur.fetchone()
-
-    if not row:
-        await cb.answer("Тред не знайдено", show_alert=True)
-        return
-
-    uid = int(row["user_id"])
-    q = row["question"] or ""
-
-    # Парсимо ПІБ та № замовлення з нашого формату [BILL]\nПІБ: ...\nЗамовлення: ...
-    name_match = re.search(r"ПІБ:\s*(.+)", q)
-    order_match = re.search(r"Замовлення:\s*(.+)", q)
-    name = (name_match.group(1).strip() if name_match else "").strip()
-    order_no = (order_match.group(1).strip() if order_match else "").strip()
-
-    text_out = render_bill_template(name or "—", order_no or "—")
-
-    # Перевірка заповнюваності реквізитів
-    warn = []
-    if not BILL_IBAN: warn.append("BILL_IBAN")
-    if not BILL_RECIPIENT: warn.append("BILL_RECIPIENT")
-    if warn:
-        text_out += ("\n\n⚠️ Увага: деякі реквізити не задані в Environment: "
-                     + ", ".join(warn))
-
-    try:
-        await bot.send_message(uid, text_out, reply_markup=user_kb())
-        await cb.answer("Шаблон рахунку надіслано користувачу")
-        # Можемо також позначити адміну
-        await cb.message.reply("Надіслано користувачу ✅")
-    except Exception as e:
-        await cb.answer("Помилка відправки", show_alert=True)
-        await cb.message.reply(f"Помилка відправки: {e}")
 
 
 # ============================== Точка входу ================================
