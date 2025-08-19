@@ -19,6 +19,8 @@ from telegram.ext import (
     Application, ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters,
 )
+from telegram import InputMediaPhoto
+import re
 
 # ===================== НАЛАШТУВАННЯ (Render env) =====================
 
@@ -78,11 +80,9 @@ def ensure_draft(user_id: int) -> Dict[str, Any]:
         DRAFTS[user_id] = {"items": [], "cursor": 0}
     return DRAFTS[user_id]
 
+URL_RE = re.compile(r'(https?://\S+)')
+
 def parse_item_line(text: str) -> Dict[str, str]:
-    """
-    Парсимо позицію з підпису/рядка:
-    'Назва | Ціна | плюс | URL' або просто з URL у будь-якому місці.
-    """
     text = (text or "").strip()
     m = URL_RE.search(text)
     url = m.group(1) if m else ""
@@ -98,7 +98,9 @@ def parse_item_line(text: str) -> Dict[str, str]:
     price = parts[1] if len(parts) > 1 else ""
     note  = parts[2] if len(parts) > 2 else ""
 
-    return {"title": title, "price": price, "note": note, "url": url, "photo_id": ""}
+    # ⬇️ додано doc_id
+    return {"title": title, "price": price, "note": note, "url": url, "photo_id": "", "doc_id": ""}
+
 
 def render_items(items: List[Dict[str, str]]) -> str:
     if not items:
@@ -562,3 +564,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
