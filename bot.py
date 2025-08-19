@@ -29,25 +29,38 @@ from telegram.ext import (
 
 # ------------------------- НАСТРОЙКИ -------------------------
 import os
-from dotenv import load_dotenv  # pip install python-dotenv
 
-load_dotenv()  # підхоплює змінні з .env якщо він існує
+def _env(name, *alts, default=None):
+    for k in (name, *alts):
+        v = os.getenv(k)
+        if v:
+            return v
+    return default
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
-# ADMIN_IDS у вигляді "111,222,333"
-ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x}
-NEW_ARRIVALS_URL = os.getenv(
+# Токен бота: в Render ключ API_TOKEN (або TELEGRAM_TOKEN як альтернатива)
+TOKEN = _env("API_TOKEN", "TELEGRAM_TOKEN")
+
+# ID каналу/чату, куди постимо новинки: створи ключ CHANNEL_ID у Render
+# Для каналу це зазвичай від'ємне число типу -1001234567890
+CHANNEL_ID = int(_env("CHANNEL_ID", "TARGET_CHAT_ID", "CHAT_ID", default="0"))
+
+# Адміни: у Render ключ ADMIN_ID. Може бути один ID або список через кому.
+_admin_raw = _env("ADMIN_ID", "ADMIN_IDS", default="")
+ADMIN_IDS = {int(x) for x in _admin_raw.replace(" ", "").split(",") if x}
+
+# Лінк на розділ новинок
+NEW_ARRIVALS_URL = _env(
     "NEW_ARRIVALS_URL",
-    "https://zamorskiepodarki.com/uk/novoe-postuplenie/"
+    default="https://zamorskiepodarki.com/uk/novoe-postuplenie/"
 )
 
 if not TOKEN or CHANNEL_ID == 0 or not ADMIN_IDS:
     raise SystemExit(
-        "Не задані TELEGRAM_TOKEN або CHANNEL_ID або ADMIN_IDS. "
-        "Створи .env або задай змінні середовища."
+        "Не задані API_TOKEN або CHANNEL_ID або ADMIN_ID. "
+        "Додай ці ключі у Render Environment Variables."
     )
 # -------------------------------------------------------------
+
 
 
 logging.basicConfig(
@@ -390,3 +403,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
