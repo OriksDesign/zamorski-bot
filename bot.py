@@ -1,8 +1,6 @@
 # bot.py
 # -*- coding: utf-8 -*-
-# Бот «Заморські Подарунки»
-# Користувачі: меню (Питання оператору / Новинки / Умови співпраці)
-# Адміни: редактор «Нове надходження» (додати, порядок, перегляд, публікація з фото)
+# «Заморські Подарунки» — клієнтський чат-бот + адмін-редактор «Нове надходження»
 
 from __future__ import annotations
 
@@ -11,6 +9,7 @@ import os
 import re
 from typing import Dict, List, Any, Tuple
 
+import requests
 from telegram import (
     Update, InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton, InputMediaPhoto,
@@ -19,8 +18,6 @@ from telegram.ext import (
     Application, ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters,
 )
-from telegram import InputMediaPhoto
-import re
 
 # ===================== НАЛАШТУВАННЯ (Render env) =====================
 
@@ -39,6 +36,7 @@ NEW_ARRIVALS_URL = _env(
     "NEW_ARRIVALS_URL",
     default="https://zamorskiepodarki.com/uk/novoe-postuplenie/"
 )
+NP_API_KEY = _env("NP_API_KEY", default="")  # опційно
 # Оперативна ціль публікації (можна змінити /dest)
 PUBLISH_CHAT_ID = CHANNEL_ID
 
@@ -62,8 +60,10 @@ log = logging.getLogger("zamorski-bot")
 
 # Чернетки для адмінів (редактор новинок)
 DRAFTS: Dict[int, Dict[str, Any]] = {}
-# Очікуємо питання від користувача після натискання кнопки
+# Очікування дій від клієнтів
 WAITING_QUESTION: Dict[int, bool] = {}
+WAITING_TRACK: Dict[int, bool] = {}     # чекаємо ТТН/№замовлення
+WAITING_INVOICE: Dict[int, bool] = {}   # чекаємо дані для рахунку
 # Мапа «службове повідомлення адміна → user_id» для відповідей
 SUPPORT_THREADS: Dict[Tuple[int, int], int] = {}
 THREAD_NO = 1
@@ -80,9 +80,11 @@ def ensure_draft(user_id: int) -> Dict[str, Any]:
         DRAFTS[user_id] = {"items": [], "cursor": 0}
     return DRAFTS[user_id]
 
-URL_RE = re.compile(r'(https?://\S+)')
-
 def parse_item_line(text: str) -> Dict[str, str]:
+    """
+    Парсимо позицію з підпису/рядка:
+    'Назва | Ціна | плюс | URL' або просто з URL у будь-якому місці.
+    """
     text = (text or "").strip()
     m = URL_RE.search(text)
     url = m.group(1) if m else ""
@@ -98,9 +100,8 @@ def parse_item_line(text: str) -> Dict[str, str]:
     price = parts[1] if len(parts) > 1 else ""
     note  = parts[2] if len(parts) > 2 else ""
 
-    # ⬇️ додано doc_id
+    # photo_id — для стислого Photo, doc_id — для document-image
     return {"title": title, "price": price, "note": note, "url": url, "photo_id": "", "doc_id": ""}
-
 
 def render_items(items: List[Dict[str, str]]) -> str:
     if not items:
@@ -131,6 +132,45 @@ def render_caption(item: Dict[str, str], idx: int | None = None) -> str:
     if item.get("url"):  line += "\n" + item["url"]
     return line
 
+def np_track(ttn: str, phone: str | None = None) -> tuple[str | None, str]:
+    """
+    Повертає (повідомлення, причина). Якщо повідомлення None:
+      reason: 'no_api' (немає ключа), 'bad' (помилка API), 'empty' (немає даних).
+    """
+    if not NP_API_KEY:
+        return None, "no_api"
+    payload = {
+        "apiKey": NP_API_KEY,
+        "modelName": "TrackingDocument",
+        "calledMethod": "getStatusDocuments",
+        "methodProperties": {"Documents": [{"DocumentNumber": ttn, "Phone": phone or ""}]}
+    }
+    try:
+        r = requests.post("https://api.novaposhta.ua/v2.0/json/", json=payload, timeout=15)
+        data = r.json()
+    except Exception:
+        return None, "bad"
+    if not data.get("success"):
+        return None, "bad"
+    arr = data.get("data", [])
+    if not arr:
+        return None, "empty"
+    d = arr[0]
+    lines = [f"Статус: {d.get('Status','—')}", f"Номер ТТН: {d.get('Number','—')}"]
+    if d.get("CitySender") or d.get("WarehouseSender"):
+        lines.append(f"Відправлено з: {d.get('CitySender','')}, {d.get('WarehouseSender','')}".strip(", "))
+    if d.get("CityRecipient") or d.get("WarehouseRecipient"):
+        lines.append(f"Отримання: {d.get('CityRecipient','')}, {d.get('WarehouseRecipient','')}".strip(", "))
+    if d.get("RecipientFullNameEW"):
+        lines.append(f"Одержувач: {d.get('RecipientFullNameEW')}")
+    if d.get("ScheduledDeliveryDate"):
+        lines.append(f"Планова дата: {d.get('ScheduledDeliveryDate')}")
+    if d.get("ActualDeliveryDate"):
+        lines.append(f"Фактична дата: {d.get('ActualDeliveryDate')}")
+    if d.get("CostOnSite"):
+        lines.append(f"Оціночна вартість: {d.get('CostOnSite')} грн")
+    return "\n".join(lines), ""
+
 def kb_main_admin() -> InlineKeyboardMarkup:
     kb = [
         [
@@ -150,6 +190,9 @@ USER_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton("Питання оператору")],
         [KeyboardButton("Новинки"), KeyboardButton("Умови співпраці")],
+        [KeyboardButton("Стан замовлення / ТТН")],
+        [KeyboardButton("Рахунок на оплату")],
+        [KeyboardButton("Поділитись телефоном", request_contact=True)],
     ],
     resize_keyboard=True
 )
@@ -199,7 +242,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Адмін-команди:",
             "• /new /list /clear /preview /publish — робота з новинками",
             "• /dest — керування ціллю публікації (here|env|<id>)",
-            "• Щоб додати позицію з фото — надішли фото з підписом: 'Назва | Ціна | плюс | URL'",
+            "• Щоб додати позицію з фото — надішліть фото/файл-зображення з підписом: 'Назва | Ціна | плюс | URL'",
         ]
     await update.effective_message.reply_text("\n".join(txt), reply_markup=USER_KB)
 
@@ -251,6 +294,8 @@ async def handle_user_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if text == "питання оператору":
         WAITING_QUESTION[user.id] = True
+        WAITING_TRACK.pop(user.id, None)
+        WAITING_INVOICE.pop(user.id, None)
         await update.effective_message.reply_text(
             "Напишіть ваше питання одним повідомленням (можна додати фото/файл з підписом) — і ми відповімо якнайшвидше.",
             reply_markup=USER_KB
@@ -273,10 +318,33 @@ async def handle_user_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
+    if text == "стан замовлення / ттн":
+        WAITING_TRACK[user.id] = True
+        WAITING_QUESTION.pop(user.id, None)
+        WAITING_INVOICE.pop(user.id, None)
+        await update.effective_message.reply_text(
+            "Введіть *ТТН Нової пошти* (14 цифр) або номер вашого замовлення в магазині.\n"
+            "_Порада:_ якщо у вас лише №замовлення — ми передамо запит оператору.",
+            reply_markup=USER_KB,
+            parse_mode="Markdown"
+        )
+        return
+
+    if text == "рахунок на оплату":
+        WAITING_INVOICE[user.id] = True
+        WAITING_QUESTION.pop(user.id, None)
+        WAITING_TRACK.pop(user.id, None)
+        await update.effective_message.reply_text(
+            "Вкажіть, будь ласка, *суму* та *email для рахунку*.\n"
+            "Наприклад: `1250 грн, test@example.com`",
+            reply_markup=USER_KB,
+            parse_mode="Markdown"
+        )
+        return
+
 # ======================== САПОРТ: ПИТАННЯ/ВІДПОВІДІ =====================
 
 async def _notify_admins_about_question(update: Update, context: ContextTypes.DEFAULT_TYPE, header_text: str):
-    global SUPPORT_THREADS
     for admin_id in ADMIN_IDS:
         header = await context.bot.send_message(
             admin_id,
@@ -297,20 +365,69 @@ async def _notify_admins_about_question(update: Update, context: ContextTypes.DE
             SUPPORT_THREADS[(admin_id, body_msg.message_id)] = update.effective_user.id
 
 async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Ловимо повідомлення користувача після натискання «Питання оператору»."""
+    """Ловимо повідомлення користувача для сценаріїв: ТТН, рахунок, питання."""
     user_id = update.effective_user.id
-    if not WAITING_QUESTION.get(user_id):
+    text = (update.message.text or "").strip()
+
+    # --- Стан замовлення / ТТН ---
+    if WAITING_TRACK.get(user_id):
+        WAITING_TRACK[user_id] = False
+        ttn = "".join(ch for ch in text if ch.isdigit())
+        if len(ttn) >= 10:
+            msg, reason = np_track(ttn)
+            if msg:
+                await update.effective_message.reply_text(msg, reply_markup=USER_KB)
+                return
+            # немає API або помилка — передамо оператору
+            header = f"Запит відстеження (ТТН/замовлення): {text}\nThread #{context.bot.id}"
+            await _notify_admins_about_question(update, context, header)
+            await update.effective_message.reply_text(
+                "Передали запит оператору. Відповімо найближчим часом.",
+                reply_markup=USER_KB
+            )
+            return
+        # не схоже на ТТН — напряму оператору
+        header = f"Запит стану замовлення: {text}\nThread #{context.bot.id}"
+        await _notify_admins_about_question(update, context, header)
+        await update.effective_message.reply_text(
+            "Передали запит оператору. Відповімо найближчим часом.",
+            reply_markup=USER_KB
+        )
         return
-    WAITING_QUESTION[user_id] = False
 
-    global THREAD_NO
-    thread = THREAD_NO
-    THREAD_NO += 1
+    # --- Рахунок на оплату ---
+    if WAITING_INVOICE.get(user_id):
+        WAITING_INVOICE[user_id] = False
+        header = f"Запит рахунку на оплату: {text}\nThread #{context.bot.id}"
+        await _notify_admins_about_question(update, context, header)
+        await update.effective_message.reply_text(
+            "Запит на рахунок отримано. Оператор надішле рахунок у відповідь у цьому чаті.",
+            reply_markup=USER_KB
+        )
+        return
 
-    header = f"Питання від користувача {user_id}\nThread #{thread}"
-    await _notify_admins_about_question(update, context, header)
+    # --- Питання оператору ---
+    if WAITING_QUESTION.get(user_id):
+        WAITING_QUESTION[user_id] = False
+        global THREAD_NO
+        thread = THREAD_NO
+        THREAD_NO += 1
+        header = f"Питання від користувача {user_id}\nThread #{thread}"
+        await _notify_admins_about_question(update, context, header)
+        await update.effective_message.reply_text(
+            "Ваше питання надіслано оператору. Дякуємо за звернення!",
+            reply_markup=USER_KB
+        )
 
-    await update.effective_message.reply_text("Ваше питання надіслано оператору. Дякуємо за звернення!", reply_markup=USER_KB)
+async def on_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Користувач поділився контактом — передаємо адмінам."""
+    c = update.message.contact
+    human = f"{c.first_name or ''} {c.last_name or ''}".strip()
+    txt = f"Контакт від користувача {update.effective_user.id}:\nТелефон: {c.phone_number}\nІм'я: {human}"
+    for admin_id in ADMIN_IDS:
+        msg = await context.bot.send_message(admin_id, txt)
+        SUPPORT_THREADS[(admin_id, msg.message_id)] = update.effective_user.id
+    await update.effective_message.reply_text("Дякуємо! Ми зв'яжемося з вами найближчим часом.", reply_markup=USER_KB)
 
 async def on_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Адмін відповів реплаєм на службове повідомлення — перешлемо користувачу."""
@@ -377,8 +494,10 @@ async def cmd_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.effective_message.reply_text("Список порожній. Додайте хоча б одну позицію.")
         return
 
+    # Заголовок + лінк
     await context.bot.send_message(PUBLISH_CHAT_ID, f"Нове надходження\n\nДивись всі новинки: {NEW_ARRIVALS_URL}")
 
+    # Відправляємо позиції: фото — альбомами (по 10), document-image — окремо, без фото — текстом
     batch: List[InputMediaPhoto] = []
     idx = 1
     for it in draft["items"]:
@@ -403,7 +522,6 @@ async def cmd_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     await update.effective_message.reply_text("Опубліковано ✅", reply_markup=kb_main_admin())
 
-
 async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user = update.effective_user
@@ -422,7 +540,8 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Надішліть позицію одним рядком:\n"
             "Назва | Ціна | плюс | URL (за бажанням)\n\n"
             "Можна вставити одразу кілька рядків — кожен стане окремою позицією.\n"
-            "Позицію з фото додайте як «фото з підписом» у такому ж форматі."
+            "Позицію з зображенням додайте як *фото* або *файл-зображення* з підписом у такому ж форматі.",
+            parse_mode="Markdown"
         )
         return
     if data == "na:clear_confirm":
@@ -439,7 +558,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not PUBLISH_CHAT_ID:
             await query.message.reply_text("Ціль публікації не задана. /dest here або /dest <id>.")
             return
-        # делегуємо на cmd_publish для однакової поведінки
         await cmd_publish(update, context)
         return
     if data == "na:edit":
@@ -500,23 +618,40 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=kb_edit(draft["cursor"], len(items)),
             )
 
-# ---- Адмін: додавання позиції з фото (підпис — як у звичайного рядка) ----
-async def on_admin_photo_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# ---- Адмін: додавання позиції з МЕДІА (photo або document-image) ----
+async def on_admin_media_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
-    caption = update.message.caption or ""
+
+    caption = (update.message.caption or "").strip()
+    if not caption:
+        await update.effective_message.reply_text("Додайте підпис у форматі: «Назва | Ціна | плюс | URL».")
+        return
+
     item = parse_item_line(caption)
-    file_id = update.message.photo[-1].file_id if update.message.photo else ""
-    item["photo_id"] = file_id
+
+    if update.message.photo:
+        item["photo_id"] = update.message.photo[-1].file_id
+    elif update.message.document:
+        mt = update.message.document.mime_type or ""
+        if mt.startswith("image/"):
+            item["doc_id"] = update.message.document.file_id
+        else:
+            await update.effective_message.reply_text("Це не схоже на зображення. Надішліть фото або файл-картинку.")
+            return
+    else:
+        await update.effective_message.reply_text("Підтримуються фото або файли-зображення з підписом.")
+        return
+
     draft = ensure_draft(update.effective_user.id)
     draft["items"].append(item)
     await update.effective_message.reply_text(
-        "Додано позицію з фото.\n\nПоточний список:\n" + render_items(draft["items"]),
+        "Додано позицію з зображенням.\n\nПоточний список:\n" + render_items(draft["items"]),
         reply_markup=kb_main_admin(),
         disable_web_page_preview=True,
     )
 
-# ---- Адмін: додавання позицій текстом (можна пачкою) ----
+# ---- Адмін: додавання позицій ТЕКСТОМ (можна пачкою) ----
 async def on_admin_list_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
@@ -544,6 +679,11 @@ def main() -> None:
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("whoami", whoami))
     app.add_handler(CommandHandler("dest", cmd_dest))
+    app.add_handler(CommandHandler("new", cmd_new))
+    app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("clear", cmd_clear))
+    app.add_handler(CommandHandler("preview", cmd_preview))
+    app.add_handler(CommandHandler("publish", cmd_publish))
 
     # Адмін: callback-кнопки редактора
     app.add_handler(CallbackQueryHandler(on_cb))
@@ -551,16 +691,19 @@ def main() -> None:
     # Адмін: відповіді реплаєм на службові повідомлення клієнтів
     app.add_handler(MessageHandler(filters.REPLY & filters.User(list(ADMIN_IDS)), on_admin_reply))
 
-    # Адмін: додавання позицій з фото (через підпис до фото) — ПЕРЕД текстовим хендлером
-    app.add_handler(MessageHandler(filters.PHOTO & filters.User(list(ADMIN_IDS)), on_admin_photo_item))
+    # Адмін: додавання позицій із зображеннями (фото або документ-image) — ПЕРЕД текстовим хендлером
+    app.add_handler(MessageHandler(filters.ATTACHMENT & filters.User(list(ADMIN_IDS)), on_admin_media_item))
 
     # Адмін: додавання позицій текстом (ставимо ПЕРЕД загальними текстами)
     app.add_handler(MessageHandler(filters.TEXT & filters.User(list(ADMIN_IDS)) & ~filters.COMMAND, on_admin_list_text))
 
-    # Користувацькі кнопки (простий текст без команд)
+    # Користувач: поділитись телефоном
+    app.add_handler(MessageHandler(filters.CONTACT, on_contact))
+
+    # Користувач: кнопки (звичайний текст без команд)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_buttons))
 
-    # Повідомлення з питанням для оператора (текст або вкладення), коли користувач у режимі «питання»
+    # Користувач: повідомлення для сценаріїв (ТТН/рахунок/питання) — текст або вкладення
     app.add_handler(MessageHandler((filters.TEXT | filters.ATTACHMENT) & ~filters.COMMAND, on_user_message))
 
     log.info("Bot started")
@@ -568,5 +711,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
