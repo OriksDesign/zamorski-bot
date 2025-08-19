@@ -12,6 +12,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import ForceReply
+
 
 
 # ----------------------------- Конфігурація -----------------------------
@@ -267,7 +269,11 @@ async def got_question(message: types.Message, state: FSMContext):
         f"Питання від користувача <code>{user_id}</code>\n"
         f"Thread #{thread_id}\n\n{text}"
     )
-    sent = await bot.send_message(ADMIN_ID_PRIMARY, note)
+    sent = await bot.send_message(
+    ADMIN_ID_PRIMARY,
+    note,
+    reply_markup=ForceReply(input_field_placeholder="Напишіть відповідь користувачу…")
+)
 
     with db.cursor() as cur:
         cur.execute(
@@ -386,3 +392,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
