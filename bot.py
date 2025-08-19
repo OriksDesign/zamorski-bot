@@ -26,6 +26,9 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram import Update
+from telegram.ext import CommandHandler, ContextTypes
+
 
 # ----------------------- НАЛАШТУВАННЯ -----------------------
 import os
@@ -178,6 +181,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Или используй кнопки ниже.",
         reply_markup=kb_main(),
     )
+async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # працює і в приваті, і в групі, і в каналі
+    chat = update.effective_chat
+    await update.effective_message.reply_text(f"chat_id: {chat.id}")
 
 
 async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -383,7 +390,7 @@ def main() -> None:
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("preview", cmd_preview))
     app.add_handler(CommandHandler("publish", cmd_publish))
-
+app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
@@ -393,5 +400,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
