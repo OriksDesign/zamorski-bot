@@ -11,7 +11,6 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     ForceReply,
@@ -23,7 +22,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 
-# ============================== Конфігурація ===============================
+# ============================== КОНФІГ =====================================
 
 API_TOKEN = os.getenv("API_TOKEN", "").strip()
 NEW_ARRIVALS_URL = os.getenv(
@@ -33,10 +32,10 @@ CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()  # -100... або @channel
 
 # Адміни (один або кілька)
 ADMIN_IDS: set[int] = set()
-_single = os.getenv("ADMIN_ID", "").strip()
-if _single:
+_admin_single = os.getenv("ADMIN_ID", "").strip()
+if _admin_single:
     try:
-        ADMIN_IDS.add(int(_single))
+        ADMIN_IDS.add(int(_admin_single))
     except ValueError:
         pass
 for p in os.getenv("ADMIN_IDS", "").split(","):
@@ -48,9 +47,9 @@ for p in os.getenv("ADMIN_IDS", "").split(","):
             pass
 
 ADMIN_ID_PRIMARY: Optional[int] = None
-if _single:
+if _admin_single:
     try:
-        ADMIN_ID_PRIMARY = int(_single)
+        ADMIN_ID_PRIMARY = int(_admin_single)
     except Exception:
         ADMIN_ID_PRIMARY = None
 if ADMIN_ID_PRIMARY is None and ADMIN_IDS:
@@ -61,15 +60,14 @@ if not API_TOKEN:
 if not ADMIN_IDS:
     raise RuntimeError("Не задано ADMIN_ID або ADMIN_IDS у змінних середовища")
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("zamorski-bot")
 
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
 
 
-# ====================== Підключення до MySQL з автопінгом ===================
+# ====================== MySQL (автоперепідключення) ========================
 
 class MySQL:
     def __init__(self):
@@ -116,32 +114,36 @@ class MySQL:
 
 db = MySQL()
 
-# Таблиці
+# Ініціалізація таблиць
 with db.cursor() as cur:
-    cur.execute("""
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS subscribers (
-          user_id BIGINT PRIMARY KEY,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            user_id BIGINT PRIMARY KEY,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """)
-    cur.execute("""
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS operator_threads (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          user_id BIGINT NOT NULL,
-          question TEXT NOT NULL,
-          admin_message_id BIGINT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            question TEXT NOT NULL,
+            admin_message_id BIGINT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """)
+        """
+    )
 
 
-# =============================== Хелпери БД ================================
+# =============================== БД хелпери ================================
 
 def add_subscriber(user_id: int) -> None:
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO subscribers (user_id) VALUES (%s) "
-            "ON DUPLICATE KEY UPDATE user_id=user_id",
+            "ON DUPЛICATE KEY UPDATE user_id=user_id",
             (user_id,),
         )
 
@@ -155,7 +157,7 @@ def remove_subscriber(user_id: int) -> None:
         cur.execute("DELETE FROM subscribers WHERE user_id=%s", (user_id,))
 
 
-# ================================ FSM стани ================================
+# ================================ СТАНИ ====================================
 
 class OperatorQuestion(StatesGroup):
     waiting_text = State()
@@ -168,21 +170,24 @@ class BillRequest(StatesGroup):
     waiting_name = State()
     waiting_order = State()
 
+class SendBroadcast(StatesGroup):
+    waiting_content = State()
+
 class NewArrivals(StatesGroup):
     waiting_item = State()
     waiting_order = State()
 
 
-# ============================ Бот і диспетчер ==============================
+# ============================ БОТ/ДИСПЕТЧЕР ================================
 
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Пам'ять конструктора (по кожному адміну)
+# Пам'ять конструктора новинок (окремо для кожного адміна)
 na_lists: dict[int, List[str]] = defaultdict(list)
 
 
-# --------------------------- Клавіатури ------------------------------------
+# ============================== КЛАВІАТУРИ ================================
 
 def user_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -197,18 +202,25 @@ def user_kb() -> ReplyKeyboardMarkup:
         is_persistent=True,
     )
 
-def admin_kb() -> ReplyKeyboardRemove:
-    # Адміну клавіатуру ховаємо — все робиться через reply/кнопки
-    return ReplyKeyboardRemove()
+def admin_kb() -> ReplyKeyboardMarkup:
+    # Постійна адмінська клавіатура
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Конструктор новинок")],
+            [KeyboardButton(text="Зробити розсилку")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
-def main_kb(user_id: int):
+def main_kb(user_id: int) -> ReplyKeyboardMarkup:
     return admin_kb() if is_admin(user_id) else user_kb()
 
 def tracking_kb(ttn: str) -> InlineKeyboardMarkup:
     url = f"https://tracking.novaposhta.ua/#/uk/parcel/tracking/{ttn}"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Відстежити ТТН", url=url)]
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Відстежити ТТН", url=url)]]
+    )
 
 def na_render(admin_id: int) -> str:
     items = na_lists[admin_id]
@@ -216,8 +228,6 @@ def na_render(admin_id: int) -> str:
     for i, item in enumerate(items, 1):
         lines.append(f"{i}) {item}")
     return "\n".join(lines).strip()
-
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton  # переконайся, що цей імпорт є
 
 def na_kb(admin_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -246,7 +256,17 @@ def extract_ttn(text: Optional[str]) -> Optional[str]:
     return m.group(0) if m else None
 
 
-# ========================= Команди та обробники ============================
+# ============================ СЕРВІСНІ Ф-ЦІЇ ===============================
+
+async def notify_admin(text: str):
+    for aid in ADMIN_IDS:
+        try:
+            await bot.send_message(aid, text)
+        except Exception as e:
+            logger.warning(f"Не вдалося надіслати адміну {aid}: {e}")
+
+
+# ============================== ХЕНДЛЕРИ ===================================
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
@@ -268,6 +288,8 @@ async def whoami(message: types.Message):
         reply_markup=main_kb(message.from_user.id),
     )
 
+# -------- Користувацьке меню
+
 @dp.message(F.text == "Умови співпраці")
 async def terms(message: types.Message):
     text = (
@@ -279,8 +301,6 @@ async def terms(message: types.Message):
     )
     await message.answer(text, reply_markup=main_kb(message.from_user.id))
 
-
-# ---- Кнопка для користувача: Нові надходження (посилання) ----
 @dp.message(F.text.in_({"Нові надходження", "Новинки"}))
 async def new_arrivals(message: types.Message):
     kb = InlineKeyboardMarkup(
@@ -288,12 +308,8 @@ async def new_arrivals(message: types.Message):
     )
     await message.answer("Слідкуйте за новими надходженнями на нашому сайті.", reply_markup=kb)
 
-
-# ------------------------- Питання оператору -------------------------------
-
 @dp.message(F.text == "Питання оператору")
-async def ask_operator_generic(message: types.Message, state: FSMContext):
-    await state.update_data(topic="Загальне")
+async def ask_operator(message: types.Message, state: FSMContext):
     await message.answer("Напишіть ваше питання. Ми відповімо якнайшвидше.")
     await state.set_state(OperatorQuestion.waiting_text)
 
@@ -301,19 +317,16 @@ async def ask_operator_generic(message: types.Message, state: FSMContext):
 async def got_question(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     text = message.text or ""
-    data = await state.get_data()
-    topic = data.get("topic", "Загальне")
 
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO operator_threads (user_id, question) VALUES (%s, %s)",
-            (user_id, f"[Тема: {topic}]\n{text}"),
+            (user_id, text),
         )
         thread_id = cur.lastrowid
 
     note = (
         f"Питання від користувача <code>{user_id}</code>\n"
-        f"Тема: <b>{topic}</b>\n"
         f"Thread #{thread_id}\n\n{text}"
     )
     sent = await bot.send_message(
@@ -328,14 +341,10 @@ async def got_question(message: types.Message, state: FSMContext):
             (sent.message_id, thread_id),
         )
 
-    await message.answer(
-        "Ваше питання надіслано оператору. Дякуємо за звернення.",
-        reply_markup=user_kb(),
-    )
+    await message.answer("Ваше питання надіслано оператору. Дякуємо за звернення.", reply_markup=user_kb())
     await state.clear()
 
-
-# --------------------- Запит ТТН (ПІБ -> № замовлення) ---------------------
+# -------- Запит ТТН (ПІБ -> № замовлення)
 
 @dp.message(F.text == "Запитати ТТН Нової пошти")
 async def ttn_start(message: types.Message, state: FSMContext):
@@ -374,17 +383,12 @@ async def ttn_got_order(message: types.Message, state: FSMContext):
     )
 
     with db.cursor() as cur:
-        cur.execute(
-            "UPDATE operator_threads SET admin_message_id=%s WHERE id=%s",
-            (sent.message_id, thread_id),
-        )
+        cur.execute("UPDATE operator_threads SET admin_message_id=%s WHERE id=%s", (sent.message_id, thread_id))
 
-    await message.answer("Дякуємо! Ми перевіримо ТТН і надішлемо вам відповідь.",
-                         reply_markup=user_kb())
+    await message.answer("Дякуємо! Ми перевіримо ТТН і надішлемо вам відповідь.", reply_markup=user_kb())
     await state.clear()
 
-
-# -------- Запит рахунку (ПІБ -> № замовлення; без шаблонів) ----------------
+# -------- Запит рахунку (ПІБ -> № замовлення; без шаблонів)
 
 @dp.message(F.text == "Запитати рахунок для сплати замовлення")
 async def bill_start(message: types.Message, state: FSMContext):
@@ -423,20 +427,16 @@ async def bill_got_order(message: types.Message, state: FSMContext):
     )
 
     with db.cursor() as cur:
-        cur.execute(
-            "UPDATE operator_threads SET admin_message_id=%s WHERE id=%s",
-            (sent.message_id, thread_id),
-        )
+        cur.execute("UPDATE operator_threads SET admin_message_id=%s WHERE id=%s", (sent.message_id, thread_id))
 
-    await message.answer("Дякуємо! Надішлемо вам реквізити для оплати.",
-                         reply_markup=user_kb())
+    await message.answer("Дякуємо! Надішлемо вам реквізити для оплати.", reply_markup=user_kb())
     await state.clear()
 
 
-# ------------------------- Конструктор новинок (адмін) ---------------------
+# =========================== КОНСТРУКТОР НОВИНОК ===========================
 
 @dp.message(Command("novinki", "builder", "newpost"))
-async def na_open(message: types.Message):
+async def na_open_cmd(message: types.Message):
     if not is_admin(message.from_user.id):
         return
     uid = message.from_user.id
@@ -444,6 +444,10 @@ async def na_open(message: types.Message):
         f"Конструктор новинок.\nУ списку: {len(na_lists[uid])} позицій.",
         reply_markup=na_kb(uid),
     )
+
+@dp.message(F.text == "Конструктор новинок")
+async def na_open_btn(message: types.Message):
+    await na_open_cmd(message)
 
 @dp.callback_query(F.data.startswith("na:"))
 async def na_callbacks(cb: types.CallbackQuery, state: FSMContext):
@@ -464,9 +468,7 @@ async def na_callbacks(cb: types.CallbackQuery, state: FSMContext):
     if action == "clear":
         na_lists[uid].clear()
         await cb.message.answer("Список очищено.")
-        await cb.message.answer(
-            f"У списку: {len(na_lists[uid])} позицій.", reply_markup=na_kb(uid)
-        )
+        await cb.message.answer(f"У списку: {len(na_lists[uid])} позицій.", reply_markup=na_kb(uid))
         await cb.answer(); return
 
     if action == "reorder":
@@ -513,10 +515,7 @@ async def na_add_item(message: types.Message, state: FSMContext):
     else:
         na_lists[uid].append(txt)
         await message.reply(f"Додано ✅ (усього: {len(na_lists[uid])})")
-    await message.answer(
-        f"У списку: {len(na_lists[uid])} позицій.",
-        reply_markup=na_kb(uid),
-    )
+    await message.answer(f"У списку: {len(na_lists[uid])} позицій.", reply_markup=na_kb(uid))
     await state.clear()
 
 @dp.message(NewArrivals.waiting_order)
@@ -534,14 +533,11 @@ async def na_set_order(message: types.Message, state: FSMContext):
         await message.reply("Порядок оновлено ✅")
     except Exception:
         await message.reply("Невірний формат. Приклад: 2 1 3 4")
-    await message.answer(
-        f"У списку: {len(na_lists[uid])} позицій.",
-        reply_markup=na_kb(uid),
-    )
+    await message.answer(f"У списку: {len(na_lists[uid])} позицій.", reply_markup=na_kb(uid))
     await state.clear()
 
 
-# ---------------------------- Відповідь адміна -----------------------------
+# ============================ ВІДПОВІДІ АДМІНА ============================
 
 @dp.message()
 async def admin_router(message: types.Message, state: FSMContext):
@@ -563,15 +559,11 @@ async def admin_router(message: types.Message, state: FSMContext):
             try:
                 ttn = extract_ttn(message.text or message.caption or "")
                 if ttn:
-                    await bot.send_message(uid, f"Ваша ТТН Нової пошти: <code>{ttn}</code>",
-                                           reply_markup=tracking_kb(ttn))
-                    await bot.send_message(uid, "Якщо потрібна додаткова інформація — напишіть нам 😊",
-                                           reply_markup=user_kb())
+                    await bot.send_message(uid, f"Ваша ТТН Нової пошти: <code>{ttn}</code>", reply_markup=tracking_kb(ttn))
+                    await bot.send_message(uid, "Якщо потрібна додаткова інформація — напишіть нам 😊", reply_markup=user_kb())
                 else:
                     if message.photo:
-                        await bot.send_photo(uid, message.photo[-1].file_id,
-                                             caption=message.caption or "",
-                                             reply_markup=user_kb())
+                        await bot.send_photo(uid, message.photo[-1].file_id, caption=message.caption or "", reply_markup=user_kb())
                     else:
                         await bot.send_message(uid, message.text or "", reply_markup=user_kb())
                 await message.reply("Надіслано користувачу")
@@ -583,7 +575,7 @@ async def admin_router(message: types.Message, state: FSMContext):
                 await message.reply(f"Помилка відправки: {e}")
                 return
 
-    # Альтернатива: /reply <user_id> <текст/ТТН>
+    # Альтернатива: /reply <user_id> <текст>
     if message.text and message.text.startswith("/reply"):
         parts = message.text.split(maxsplit=2)
         if len(parts) >= 3 and parts[1].isdigit():
@@ -592,10 +584,8 @@ async def admin_router(message: types.Message, state: FSMContext):
             try:
                 ttn = extract_ttn(txt)
                 if ttn:
-                    await bot.send_message(uid, f"Ваша ТТН Нової пошти: <code>{ttn}</code>",
-                                           reply_markup=tracking_kb(ttn))
-                    await bot.send_message(uid, "Якщо потрібна додаткова інформація — напишіть нам 😊",
-                                           reply_markup=user_kb())
+                    await bot.send_message(uid, f"Ваша ТТН Нової пошти: <code>{ttn}</code>", reply_markup=tracking_kb(ttn))
+                    await bot.send_message(uid, "Якщо потрібна додаткова інформація — напишіть нам 😊", reply_markup=user_kb())
                 else:
                     await bot.send_message(uid, txt, reply_markup=user_kb())
                 await message.reply("Надіслано користувачу")
@@ -603,18 +593,56 @@ async def admin_router(message: types.Message, state: FSMContext):
                 await message.reply(f"Помилка відправки: {e}")
             return
 
+    # Кнопка розсилки на адмінській клавіатурі
+    if message.text == "Зробити розсилку":
+        await message.answer("Надішліть текст або фото з підписом для розсилки.")
+        await state.set_state(SendBroadcast.waiting_content)
 
-# ============================== Точка входу ================================
+
+# =========================== РОЗСИЛКА (АДМІН) =============================
+
+@dp.message(SendBroadcast.waiting_content, F.photo)
+async def broadcast_photo(message: types.Message, state: FSMContext):
+    await do_broadcast(photo_id=message.photo[-1].file_id, caption=message.caption or "")
+    await state.clear()
+
+@dp.message(SendBroadcast.waiting_content)
+async def broadcast_text(message: types.Message, state: FSMContext):
+    await do_broadcast(text=message.text or "")
+    await state.clear()
+
+async def do_broadcast(text: str = "", photo_id: Optional[str] = None, caption: str = ""):
+    users = get_all_subscribers()
+    ok = 0
+    blocked = 0
+    for uid in users:
+        try:
+            if photo_id:
+                await bot.send_photo(uid, photo_id, caption=caption)
+            else:
+                await bot.send_message(uid, text)
+            ok += 1
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+            continue
+        except (TelegramForbiddenError, TelegramBadRequest):
+            blocked += 1
+            remove_subscriber(uid)
+        except Exception as e:
+            logger.warning(f"Broadcast to {uid} failed: {e}")
+        await asyncio.sleep(0.05)
+    await notify_admin(f"Розсилка завершена. Успішно: {ok}, видалено зі списку: {blocked}.")
+
+
+# =============================== MAIN ======================================
 
 async def main():
     try:
-        # знімаємо webhook і чистимо чергу, щоб уникнути конфлікту getUpdates
+        # Прибираємо webhook і дропаємо чергу, щоб не було конфліктів getUpdates/webhook
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         db.close()
 
-
 if __name__ == "__main__":
     asyncio.run(main())
-
