@@ -217,15 +217,27 @@ def na_render(admin_id: int) -> str:
         lines.append(f"{i}) {item}")
     return "\n".join(lines).strip()
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton  # переконайся, що цей імпорт є
+
 def na_kb(admin_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("➕ Додати позицію", callback_data="na:add"),
-         InlineKeyboardButton("🧹 Очистити список", callback_data="na:clear")],
-        [InlineKeyboardButton("✏️ Редагувати порядок", callback_data="na:reorder")],
-        [InlineKeyboardButton("👁 Перегляд", callback_data="na:preview"),
-         InlineKeyboardButton("🚀 Опублікувати", callback_data="na:publish")],
-        [InlineKeyboardButton("🔗 Відкрити розділ новинок", url=NEW_ARRIVALS_URL)],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="➕ Додати позицію", callback_data="na:add"),
+                InlineKeyboardButton(text="🧹 Очистити список", callback_data="na:clear"),
+            ],
+            [
+                InlineKeyboardButton(text="✏️ Редагувати порядок", callback_data="na:reorder"),
+            ],
+            [
+                InlineKeyboardButton(text="👁 Перегляд", callback_data="na:preview"),
+                InlineKeyboardButton(text="🚀 Опублікувати", callback_data="na:publish"),
+            ],
+            [
+                InlineKeyboardButton(text="🔗 Відкрити розділ новинок", url=NEW_ARRIVALS_URL),
+            ],
+        ]
+    )
 
 def extract_ttn(text: Optional[str]) -> Optional[str]:
     if not text:
@@ -605,3 +617,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
