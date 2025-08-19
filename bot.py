@@ -2,37 +2,20 @@
 # -*- coding: utf-8 -*-
 # Телеграм-бот для подготовки поста «Новое поступление» и удобной замены позиций местами.
 # Требуется python-telegram-bot >= 20.0
-# 1) Установить: pip install python-telegram-bot==21.4
-# 2) Заменить значения в секции НАСТРОЙКИ ниже.
-# 3) Запуск: python bot.py
 
 from __future__ import annotations
 
-import asyncio
 import logging
+import os
 from typing import Dict, List, Any
 
-from telegram import (
-    Update,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
+    Application, ApplicationBuilder, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters,
 )
-from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes
-
 
 # ----------------------- НАЛАШТУВАННЯ -----------------------
-import os
-
 def _env(name, *alts, default=None):
     for k in (name, *alts):
         v = os.getenv(k)
@@ -53,9 +36,6 @@ if not TOKEN or CHANNEL_ID == 0 or not ADMIN_IDS:
     raise SystemExit("Не задані API_TOKEN або CHANNEL_ID або ADMIN_ID у Render.")
 # ------------------------------------------------------------
 
-
-
-
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
@@ -63,7 +43,6 @@ logging.basicConfig(
 log = logging.getLogger("new_arrivals_bot_ru")
 
 # Черновики по пользователям-админам.
-# draft = {"items": [{"title": str, "price": str, "note": str}], "cursor": int}
 DRAFTS: Dict[int, Dict[str, Any]] = {}
 
 
@@ -78,17 +57,8 @@ def ensure_draft(user_id: int) -> Dict[str, Any]:
 
 
 def parse_item_line(text: str) -> Dict[str, str]:
-    """
-    Принимает строку вида:
-      "Название | Цена | комментарий"
-      "Название - цена"
-      "Название"
-    Возвращает dict с ключами title, price, note.
-    """
-    # Унифицируем разделители
     for sep in ["—", "–", "  |  ", " | ", " - ", " — ", " – "]:
         text = text.replace(sep, "|")
-    # Подстрахуемся по одинарным
     text = text.replace(" |", "|").replace("| ", "|").replace(" -", "|").replace("- ", "|")
     parts = [p.strip() for p in text.split("|") if p.strip()]
     title = parts[0] if parts else "Без названия"
@@ -105,10 +75,7 @@ def render_items(items: List[Dict[str, str]]) -> str:
             tail.append(it["price"])
         if it.get("note"):
             tail.append(it["note"])
-        if tail:
-            lines.append(f"{i}) {it['title']} - " + " - ".join(tail))
-        else:
-            lines.append(f"{i}) {it['title']}")
+        lines.append(f"{i}) {it['title']}" + ((" - " + " - ".join(tail)) if tail else ""))
     return "\n".join(lines) if lines else "Список пуст. Добавьте позиции."
 
 
@@ -125,16 +92,12 @@ def kb_main() -> InlineKeyboardMarkup:
             InlineKeyboardButton("➕ Добавить позицию", callback_data="na:add_hint"),
             InlineKeyboardButton("🗑 Очистить список", callback_data="na:clear_confirm"),
         ],
-        [
-            InlineKeyboardButton("🧭 Редактировать порядок", callback_data="na:edit"),
-        ],
+        [InlineKeyboardButton("🧭 Редактировать порядок", callback_data="na:edit")],
         [
             InlineKeyboardButton("👁 Предпросмотр", callback_data="na:preview"),
             InlineKeyboardButton("📣 Опубликовать", callback_data="na:publish"),
         ],
-        [
-            InlineKeyboardButton("🔗 Открыть раздел новинок", url=NEW_ARRIVALS_URL),
-        ],
+        [InlineKeyboardButton("🔗 Открыть раздел новинок", url=NEW_ARRIVALS_URL)],
     ]
     return InlineKeyboardMarkup(kb)
 
@@ -142,10 +105,8 @@ def kb_main() -> InlineKeyboardMarkup:
 def kb_edit(cursor: int, total: int) -> InlineKeyboardMarkup:
     left_disabled = cursor <= 0
     right_disabled = cursor >= (total - 1)
-
     btn_prev = InlineKeyboardButton("◀", callback_data="na:nav_prev" if not left_disabled else "na:nop")
     btn_next = InlineKeyboardButton("▶", callback_data="na:nav_next" if not right_disabled else "na:nop")
-
     kb = [
         [btn_prev, InlineKeyboardButton(f"Позиция {cursor + 1} из {total}", callback_data="na:nop"), btn_next],
         [
@@ -153,9 +114,7 @@ def kb_edit(cursor: int, total: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("⬇️ Ниже", callback_data="na:down"),
             InlineKeyboardButton("❌ Удалить", callback_data="na:del"),
         ],
-        [
-            InlineKeyboardButton("🔙 Готово", callback_data="na:done"),
-        ],
+        [InlineKeyboardButton("🔙 Готово", callback_data="na:done")],
     ]
     return InlineKeyboardMarkup(kb)
 
@@ -163,10 +122,10 @@ def kb_edit(cursor: int, total: int) -> InlineKeyboardMarkup:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not is_admin(user.id):
-        await update.message.reply_text("Доступ ограничен.")
+        await update.effective_message.reply_text("Доступ ограничен.")
         return
     ensure_draft(user.id)
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "Привет. Готов собрать пост «Новое поступление».\n"
         "Отправляй позиции по одной строкой в формате:\n"
         "Название | Цена | плюс (необязательно)\n\n"
@@ -181,10 +140,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Или используй кнопки ниже.",
         reply_markup=kb_main(),
     )
+
+
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # працює і в приваті, і в групі, і в каналі
-    chat = update.effective_chat
-    await update.effective_message.reply_text(f"chat_id: {chat.id}")
+    await update.effective_message.reply_text(f"chat_id: {update.effective_chat.id}")
 
 
 async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -192,7 +151,7 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(user.id):
         return
     DRAFTS[user.id] = {"items": [], "cursor": 0}
-    await update.message.reply_text("Создан новый пустой список новинок.", reply_markup=kb_main())
+    await update.effective_message.reply_text("Создан новый пустой список новинок.", reply_markup=kb_main())
 
 
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -200,7 +159,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(user.id):
         return
     draft = ensure_draft(user.id)
-    await update.message.reply_text(render_items(draft["items"]), disable_web_page_preview=True)
+    await update.effective_message.reply_text(render_items(draft["items"]), disable_web_page_preview=True)
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -208,7 +167,7 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(user.id):
         return
     DRAFTS[user.id] = {"items": [], "cursor": 0}
-    await update.message.reply_text("Список очищен.", reply_markup=kb_main())
+    await update.effective_message.reply_text("Список очищен.", reply_markup=kb_main())
 
 
 async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -216,7 +175,7 @@ async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not is_admin(user.id):
         return
     draft = ensure_draft(user.id)
-    await update.message.reply_text(render_post(draft["items"]), disable_web_page_preview=False)
+    await update.effective_message.reply_text(render_post(draft["items"]), disable_web_page_preview=False)
 
 
 async def cmd_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -224,12 +183,11 @@ async def cmd_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not is_admin(user.id):
         return
     draft = ensure_draft(user.id)
-    text = render_post(draft["items"])
     if not draft["items"]:
-        await update.message.reply_text("Список пуст. Добавьте хотя бы одну позицию.")
+        await update.effective_message.reply_text("Список пуст. Добавьте хотя бы одну позицию.")
         return
-    await context.bot.send_message(CHANNEL_ID, text, disable_web_page_preview=False)
-    await update.message.reply_text("Опубликовано в канал.", reply_markup=kb_main())
+    await context.bot.send_message(CHANNEL_ID, render_post(draft["items"]), disable_web_page_preview=False)
+    await update.effective_message.reply_text("Опубликовано в канал.", reply_markup=kb_main())
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -240,17 +198,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not text:
         return
     draft = ensure_draft(user.id)
-
-    # Поддержка множественных строк разом (вставили список)
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-    added = 0
     for ln in lines:
-        item = parse_item_line(ln)
-        draft["items"].append(item)
-        added += 1
-
-    await update.message.reply_text(
-        f"Добавлено позиций: {added}\n\nТекущий список:\n{render_items(draft['items'])}",
+        draft["items"].append(parse_item_line(ln))
+    await update.effective_message.reply_text(
+        f"Добавлено позиций: {len(lines)}\n\nТекущий список:\n{render_items(draft['items'])}",
         reply_markup=kb_main(),
         disable_web_page_preview=True,
     )
@@ -259,7 +211,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user = update.effective_user
-
     if not is_admin(user.id):
         await query.answer("Нет доступа")
         return
@@ -320,23 +271,17 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data == "na:nav_prev":
             idx = max(0, idx - 1)
             draft["cursor"] = idx
-
         elif data == "na:nav_next":
             idx = min(len(items) - 1, idx + 1)
             draft["cursor"] = idx
-
-        elif data == "na:up":
-            if idx > 0:
-                items[idx - 1], items[idx] = items[idx], items[idx - 1]
-                idx = idx - 1
-                draft["cursor"] = idx
-
-        elif data == "na:down":
-            if idx < len(items) - 1:
-                items[idx + 1], items[idx] = items[idx], items[idx + 1]
-                idx = idx + 1
-                draft["cursor"] = idx
-
+        elif data == "na:up" and idx > 0:
+            items[idx - 1], items[idx] = items[idx], items[idx - 1]
+            idx -= 1
+            draft["cursor"] = idx
+        elif data == "na:down" and idx < len(items) - 1:
+            items[idx + 1], items[idx] = items[idx], items[idx + 1]
+            idx += 1
+            draft["cursor"] = idx
         elif data == "na:del":
             removed = items.pop(idx)
             if idx >= len(items):
@@ -349,12 +294,10 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if not items:
                 await query.message.reply_text("Список пуст.", reply_markup=kb_main())
                 return
-
         elif data == "na:done":
             await query.message.reply_text("Готово. Возврат в меню.", reply_markup=kb_main())
             return
 
-        # Обновим карточку редактирования
         if items:
             it = items[draft["cursor"]]
             await query.message.reply_text(
@@ -362,13 +305,12 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"{it['title']}" + (f" - {it['price']}" if it.get("price") else "") + (f" - {it['note']}" if it.get("note") else ""),
                 reply_markup=kb_edit(draft["cursor"], len(items)),
             )
-        return
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "Команды:\n"
         "/start — меню\n"
         "/new — новый список\n"
@@ -390,7 +332,7 @@ def main() -> None:
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("preview", cmd_preview))
     app.add_handler(CommandHandler("publish", cmd_publish))
-app.add_handler(CommandHandler("id", cmd_id))
+    app.add_handler(CommandHandler("id", cmd_id))  # <-- було поза main(), тепер ок
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
@@ -400,6 +342,3 @@ app.add_handler(CommandHandler("id", cmd_id))
 
 if __name__ == "__main__":
     main()
-
-
-
