@@ -1,9 +1,8 @@
 # bot.py
 # -*- coding: utf-8 -*-
-# Бот-магазину «Заморські Подарунки».
-# Користувачі: клавіатура з діями (питання оператору, новинки, умови).
-# Адміни: редактор «Нове надходження» з ручним порядком і публікацією.
-# Потрібно: python-telegram-bot==21.4
+# Бот «Заморські Подарунки»
+# Користувачі: меню (Питання оператору / Новинки / Умови співпраці)
+# Адміни: редактор «Нове надходження» (додати, порядок, перегляд, публікація)
 
 from __future__ import annotations
 
@@ -20,7 +19,7 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters,
 )
 
-# ============================ НАЛАШТУВАННЯ ============================
+# ===================== НАЛАШТУВАННЯ (Render env) =====================
 
 def _env(name, *alts, default=None):
     for k in (name, *alts):
@@ -37,8 +36,7 @@ NEW_ARRIVALS_URL = _env(
     "NEW_ARRIVALS_URL",
     default="https://zamorskiepodarki.com/uk/novoe-postuplenie/"
 )
-
-# Якщо треба — можна оперативно публікувати не лише у CHANNEL_ID з Render.
+# Можна оперативно перемкнути ціль публікації командою /dest
 PUBLISH_CHAT_ID = CHANNEL_ID
 
 missing = []
@@ -49,7 +47,7 @@ if not ADMIN_IDS:
 if missing:
     raise SystemExit("Не задані " + ", ".join(missing) + " у Render.")
 
-# ============================ ЛОГЕРИ ============================
+# ============================== ЛОГІНГ ===============================
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -57,23 +55,17 @@ logging.basicConfig(
 )
 log = logging.getLogger("zamorski-bot")
 
-# ============================ СТАНИ ТА СХОВИЩА ============================
+# ============================ СХОВИЩА/СТАНИ ===========================
 
-# Чернетки для адмінів (редактор «Нове надходження»)
-# draft = {"items": [{"title": str, "price": str, "note": str}], "cursor": int}
+# Чернетки для адмінів (редактор новинок)
 DRAFTS: Dict[int, Dict[str, Any]] = {}
-
-# Користувач натиснув «Питання оператору» і чекаємо наступне повідомлення як питання
+# Очікуємо питання від користувача після натискання кнопки
 WAITING_QUESTION: Dict[int, bool] = {}
-
-# Мапа тікетів: (admin_id, message_id) -> user_id
-# Адмін відповідає реплаєм на службове повідомлення — ми знаємо, кому слати відповідь
+# Мапа «службове повідомлення адміна → user_id» для відповідей
 SUPPORT_THREADS: Dict[Tuple[int, int], int] = {}
-
-# Лічильник тікетів (у пам’яті)
 THREAD_NO = 1
 
-# ============================ КОРИСНІ ФУНКЦІЇ ============================
+# ============================= УТИЛІТИ ===============================
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -135,23 +127,36 @@ USER_KB = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ============================ КОМАНДИ / МЕНЮ ============================
+def kb_edit(cursor: int, total: int) -> InlineKeyboardMarkup:
+    left_disabled = cursor <= 0
+    right_disabled = cursor >= (total - 1)
+    btn_prev = InlineKeyboardButton("◀", callback_data="na:nav_prev" if not left_disabled else "na:nop")
+    btn_next = InlineKeyboardButton("▶", callback_data="na:nav_next" if not right_disabled else "na:nop")
+    kb = [
+        [btn_prev, InlineKeyboardButton(f"Позиція {cursor + 1} з {total}", callback_data="na:nop"), btn_next],
+        [
+            InlineKeyboardButton("⬆️ Вище", callback_data="na:up"),
+            InlineKeyboardButton("⬇️ Нижче", callback_data="na:down"),
+            InlineKeyboardButton("❌ Видалити", callback_data="na:del"),
+        ],
+        [InlineKeyboardButton("🔙 Готово", callback_data="na:done")],
+    ]
+    return InlineKeyboardMarkup(kb)
+
+# ============================= КОМАНДИ ===============================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показуємо користувацьке меню всім. Адмін додатково бачить підказку про команди."""
     user = update.effective_user
     ensure_draft(user.id)
-
     greet = (
         "Вітаємо у магазині «Заморські Подарунки»!\n"
         "Оберіть дію на клавіатурі нижче або напишіть запитання у чат."
     )
     if is_admin(user.id):
         greet += (
-            "\n\nРежим адміністратора: для підготовки «Нового надходження» використовуйте команди "
+            "\n\nРежим адміністратора: для «Нового надходження» використовуйте "
             "/new /list /clear /preview /publish або кнопки в адмін-меню."
         )
-
     await update.effective_message.reply_text(greet, reply_markup=USER_KB)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -164,13 +169,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_admin(update.effective_user.id):
         txt += [
             "",
-            "Адмін-команди для «Нового надходження»:",
-            "• /new — новий список",
-            "• /list — показати список",
-            "• /clear — очистити список",
-            "• /preview — перегляд",
-            "• /publish — опублікувати у канал/чат",
-            "• /dest — керувати ціллю публікації (here|env|<id>)",
+            "Адмін-команди:",
+            "• /new /list /clear /preview /publish — робота з новинками",
+            "• /dest — керування ціллю публікації (here|env|<id>)",
         ]
     await update.effective_message.reply_text("\n".join(txt), reply_markup=USER_KB)
 
@@ -184,16 +185,15 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     )
 
-# ---------- Адмін: керування ціллю публікації ----------
 async def cmd_dest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
     global PUBLISH_CHAT_ID
     args = context.args or []
-
     if not args:
         await update.effective_message.reply_text(
-            "Поточна ціль публікації: {}\n\nВаріанти:\n"
+            "Поточна ціль публікації: {}\n\n"
+            "Варіанти:\n"
             "/dest here — публікувати у поточний чат/канал\n"
             "/dest env — використовувати CHANNEL_ID з Render\n"
             "/dest <id> — задати конкретний chat_id (числом)".format(
@@ -201,7 +201,6 @@ async def cmd_dest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         )
         return
-
     arg = args[0].lower()
     if arg == "here":
         PUBLISH_CHAT_ID = update.effective_chat.id
@@ -216,10 +215,9 @@ async def cmd_dest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except ValueError:
             await update.effective_message.reply_text("Не вдалося розпізнати id. Приклад: /dest -1001234567890")
 
-# ============================ КОРИСТУВАЧ: КНОПКИ ============================
+# ======================== КОРИСТУВАЧ: МЕНЮ/КНОПКИ =======================
 
 async def handle_user_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Опрацьовуємо тексти з реплай-клавіатури."""
     user = update.effective_user
     text = (update.message.text or "").strip().lower()
 
@@ -232,13 +230,8 @@ async def handle_user_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if text == "новинки":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Відкрити сайт", url=NEW_ARRIVALS_URL)]
-        ])
-        await update.effective_message.reply_text(
-            "Слідкуйте за новими надходженнями на нашому сайті:",
-            reply_markup=kb
-        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Відкрити сайт", url=NEW_ARRIVALS_URL)]])
+        await update.effective_message.reply_text("Слідкуйте за новими надходженнями на нашому сайті:", reply_markup=kb)
         return
 
     if text == "умови співпраці":
@@ -252,20 +245,18 @@ async def handle_user_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-# ============================ САПОРТ: ПИТАННЯ/ВІДПОВІДІ ============================
+# ======================== САПОРТ: ПИТАННЯ/ВІДПОВІДІ =====================
 
 async def _notify_admins_about_question(update: Update, context: ContextTypes.DEFAULT_TYPE, header_text: str):
-    """Розсилаємо службове повідомлення всім адмінам і зберігаємо мапінг для відповідей."""
     global SUPPORT_THREADS
     for admin_id in ADMIN_IDS:
-        # Службове повідомлення з інструкцією відповідати реплаєм
         header = await context.bot.send_message(
             admin_id,
-            header_text + "\n\nВідповісти клієнту: просто зробіть «Reply» на це повідомлення і напишіть відповідь."
+            header_text + "\n\nВідповісти клієнту: зробіть «Reply» на це повідомлення і напишіть відповідь."
         )
         SUPPORT_THREADS[(admin_id, header.message_id)] = update.effective_user.id
 
-        # Копія оригіналу (якщо це не чистий текст)
+        # докладаємо зміст
         if update.message and (update.message.photo or update.message.document or update.message.video or update.message.voice):
             copied = await context.bot.copy_message(
                 chat_id=admin_id,
@@ -274,17 +265,16 @@ async def _notify_admins_about_question(update: Update, context: ContextTypes.DE
             )
             SUPPORT_THREADS[(admin_id, copied.message_id)] = update.effective_user.id
         elif update.message and update.message.text:
-            body = "Текст: " + update.message.text
-            body_msg = await context.bot.send_message(admin_id, body)
+            body_msg = await context.bot.send_message(admin_id, "Текст: " + update.message.text)
             SUPPORT_THREADS[(admin_id, body_msg.message_id)] = update.effective_user.id
 
 async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Якщо користувач у режимі питання — відправляємо адмінам."""
+    """Ловимо повідомлення користувача після натискання «Питання оператору»."""
     user_id = update.effective_user.id
     if not WAITING_QUESTION.get(user_id):
-        return  # інші тексти ловить handle_user_buttons або ігноруємо
-
+        return
     WAITING_QUESTION[user_id] = False
+
     global THREAD_NO
     thread = THREAD_NO
     THREAD_NO += 1
@@ -292,10 +282,7 @@ async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     header = f"Питання від користувача {user_id}\nThread #{thread}"
     await _notify_admins_about_question(update, context, header)
 
-    await update.effective_message.reply_text(
-        "Ваше питання надіслано оператору. Дякуємо за звернення!",
-        reply_markup=USER_KB
-    )
+    await update.effective_message.reply_text("Ваше питання надіслано оператору. Дякуємо за звернення!", reply_markup=USER_KB)
 
 async def on_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Адмін відповів реплаєм на службове повідомлення — перешлемо користувачу."""
@@ -304,13 +291,10 @@ async def on_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     reply = update.message.reply_to_message
     if not reply:
         return
-
     key = (update.effective_user.id, reply.message_id)
     user_id = SUPPORT_THREADS.get(key)
     if not user_id:
         return
-
-    # Пересилаємо будь-який тип повідомлення як копію
     await context.bot.copy_message(
         chat_id=user_id,
         from_chat_id=update.effective_chat.id,
@@ -318,7 +302,7 @@ async def on_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
     await update.effective_message.reply_text("Надіслано користувачу ✅")
 
-# ============================ АДМІН: НОВЕ НАДХОДЖЕННЯ ============================
+# ===================== АДМІН: «НОВЕ НАДХОДЖЕННЯ» =====================
 
 async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
@@ -347,39 +331,17 @@ async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def cmd_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
-
     if not PUBLISH_CHAT_ID:
-        await update.effective_message.reply_text(
-            "Ціль публікації не задана. Використай /dest here або /dest <id>."
-        )
+        await update.effective_message.reply_text("Ціль публікації не задана. Використай /dest here або /dest <id>.")
         return
-
     draft = ensure_draft(update.effective_user.id)
     if not draft["items"]:
         await update.effective_message.reply_text("Список порожній. Додайте хоча б одну позицію.")
         return
-
     await context.bot.send_message(PUBLISH_CHAT_ID, render_post(draft["items"]), disable_web_page_preview=False)
     await update.effective_message.reply_text("Опубліковано ✅", reply_markup=kb_main_admin())
 
-def kb_edit(cursor: int, total: int) -> InlineKeyboardMarkup:
-    left_disabled = cursor <= 0
-    right_disabled = cursor >= (total - 1)
-    btn_prev = InlineKeyboardButton("◀", callback_data="na:nav_prev" if not left_disabled else "na:nop")
-    btn_next = InlineKeyboardButton("▶", callback_data="na:nav_next" if not right_disabled else "na:nop")
-    kb = [
-        [btn_prev, InlineKeyboardButton(f"Позиція {cursor + 1} з {total}", callback_data="na:nop"), btn_next],
-        [
-            InlineKeyboardButton("⬆️ Вище", callback_data="na:up"),
-            InlineKeyboardButton("⬇️ Нижче", callback_data="na:down"),
-            InlineKeyboardButton("❌ Видалити", callback_data="na:del"),
-        ],
-        [InlineKeyboardButton("🔙 Готово", callback_data="na:done")],
-    ]
-    return InlineKeyboardMarkup(kb)
-
 async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Кнопки адмін-редактора."""
     query = update.callback_query
     user = update.effective_user
     if not is_admin(user.id):
@@ -392,24 +354,20 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if data == "na:nop":
         return
-
     if data == "na:add_hint":
         await query.message.reply_text(
             "Надішліть позицію одним рядком:\n"
             "Назва | Ціна | плюс\n\n"
-            "Можна вставити відразу кілька рядків — кожен стане окремою позицією."
+            "Можна вставити одразу кілька рядків — кожен стане окремою позицією."
         )
         return
-
     if data == "na:clear_confirm":
         DRAFTS[user.id] = {"items": [], "cursor": 0}
         await query.message.reply_text("Список очищено.", reply_markup=kb_main_admin())
         return
-
     if data == "na:preview":
         await query.message.reply_text(render_post(draft["items"]), disable_web_page_preview=False)
         return
-
     if data == "na:publish":
         if not draft["items"]:
             await query.message.reply_text("Список порожній. Додайте хоча б одну позицію.")
@@ -420,7 +378,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await context.bot.send_message(PUBLISH_CHAT_ID, render_post(draft["items"]), disable_web_page_preview=False)
         await query.message.reply_text("Опубліковано ✅", reply_markup=kb_main_admin())
         return
-
     if data == "na:edit":
         if not draft["items"]:
             await query.message.reply_text("Список порожній. Спочатку додайте позиції.")
@@ -435,6 +392,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
+    # Навігація/зміни
     if data in {"na:nav_prev", "na:nav_next", "na:up", "na:down", "na:del", "na:done"}:
         items = draft["items"]
         if not items:
@@ -450,12 +408,10 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             draft["cursor"] = idx
         elif data == "na:up" and idx > 0:
             items[idx - 1], items[idx] = items[idx], items[idx - 1]
-            idx -= 1
-            draft["cursor"] = idx
+            draft["cursor"] = idx - 1
         elif data == "na:down" and idx < len(items) - 1:
             items[idx + 1], items[idx] = items[idx], items[idx + 1]
-            idx += 1
-            draft["cursor"] = idx
+            draft["cursor"] = idx + 1
         elif data == "na:del":
             removed = items.pop(idx)
             if idx >= len(items):
@@ -480,10 +436,8 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=kb_edit(draft["cursor"], len(items)),
             )
 
-# ============================ ХЕНДЛЕРИ ДОДАВАННЯ ПОЗИЦІЙ ============================
-
-async def on_any_text_for_admin_lists(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Адмін надіслав рядки для списку новинок (можна пачкою)."""
+# Текстові рядки від адміна для списку новинок (додаємо позиції)
+async def on_admin_list_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
     text = (update.message.text or "").strip()
@@ -499,47 +453,35 @@ async def on_any_text_for_admin_lists(update: Update, context: ContextTypes.DEFA
         disable_web_page_preview=True,
     )
 
-# ============================ MAIN ============================
+# ================================ MAIN ================================
 
 def main() -> None:
     app: Application = ApplicationBuilder().token(TOKEN).build()
 
-    # Базові команди
+    # Команди
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("whoami", whoami))
-
-    # Адмін: керування місцем публікації
     app.add_handler(CommandHandler("dest", cmd_dest))
 
-    # Адмін: редактор «Нове надходження»
-    app.add_handler(CommandHandler("new", cmd_new))
-    app.add_handler(CommandHandler("list", cmd_list))
-    app.add_handler(CommandHandler("clear", cmd_clear))
-    app.add_handler(CommandHandler("preview", cmd_preview))
-    app.add_handler(CommandHandler("publish", cmd_publish))
+    # Адмін: callback-кнопки редактора
     app.add_handler(CallbackQueryHandler(on_cb))
 
-    # Користувацькі кнопки (реплай-клавіатура)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_buttons))
-
-# ловимо або текст, або будь-які вкладення, але не команди
-app.add_handler(MessageHandler(
-    (filters.TEXT | filters.ATTACHMENT) & ~filters.COMMAND,
-    on_user_message
-))
-
-
-    # Адмін відповідає реплаєм на службове повідомлення — перешлемо клієнту
+    # Адмін: відповіді реплаєм на службові повідомлення клієнтів
     app.add_handler(MessageHandler(filters.REPLY & filters.User(list(ADMIN_IDS)), on_admin_reply))
 
-    # Текст для списку новинок (адмін), якщо це не кнопка/команда і не сапорт
-    app.add_handler(MessageHandler(filters.TEXT & filters.User(list(ADMIN_IDS)) & ~filters.COMMAND, on_any_text_for_admin_lists))
+    # Адмін: додавання позицій текстом (ставимо ПЕРЕД загальними текстами)
+    app.add_handler(MessageHandler(filters.TEXT & filters.User(list(ADMIN_IDS)) & ~filters.COMMAND, on_admin_list_text))
+
+    # Користувацькі кнопки (простий текст без команд)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_buttons))
+
+    # Повідомлення з питанням для оператора (текст або вкладення), коли користувач у режимі «питання»
+    app.add_handler(MessageHandler((filters.TEXT | filters.ATTACHMENT) & ~filters.COMMAND, on_user_message))
 
     log.info("Bot started")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
-
