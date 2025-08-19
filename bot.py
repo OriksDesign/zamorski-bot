@@ -281,7 +281,8 @@ async def got_question(message: types.Message, state: FSMContext):
             (sent.message_id, thread_id),
         )
 
-    await message.answer("Ваше питання надіслано оператору. Дякуємо за звернення.")
+    await message.answer("Ваше питання надіслано оператору. Дякуємо за звернення.",
+                     reply_markup=main_kb(user_id))
     await state.clear()
 
 
@@ -307,9 +308,12 @@ async def admin_router(message: types.Message, state: FSMContext):
             uid = int(row["user_id"])
             try:
                 if message.photo:
-                    await bot.send_photo(uid, message.photo[-1].file_id, caption=message.caption or "")
+                    await bot.send_photo(uid, message.photo[-1].file_id,
+                     caption=message.caption or "",
+                     reply_markup=main_kb(uid))
                 else:
-                    await bot.send_message(uid, message.text or "")
+                    await bot.send_message(uid, message.text or "",
+                       reply_markup=main_kb(uid))
                 await message.reply("Надіслано користувачу")
                 return
             except TelegramForbiddenError:
@@ -366,7 +370,7 @@ async def do_broadcast(text: str = "", photo_id: Optional[str] = None, caption: 
             if photo_id:
                 await bot.send_photo(uid, photo_id, caption=caption)
             else:
-                await bot.send_message(uid, text)
+                await bot.send_message(uid, txt, reply_markup=main_kb(uid))
             ok += 1
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
@@ -392,4 +396,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
