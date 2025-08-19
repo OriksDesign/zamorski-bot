@@ -2,17 +2,18 @@
 # -*- coding: utf-8 -*-
 # Бот «Заморські Подарунки»
 # Користувачі: меню (Питання оператору / Новинки / Умови співпраці)
-# Адміни: редактор «Нове надходження» (додати, порядок, перегляд, публікація)
+# Адміни: редактор «Нове надходження» (додати, порядок, перегляд, публікація з фото)
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Dict, List, Any, Tuple
 
 from telegram import (
     Update, InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, InputMediaPhoto,
 )
 from telegram.ext import (
     Application, ApplicationBuilder, CommandHandler, MessageHandler,
@@ -36,7 +37,7 @@ NEW_ARRIVALS_URL = _env(
     "NEW_ARRIVALS_URL",
     default="https://zamorskiepodarki.com/uk/novoe-postuplenie/"
 )
-# Можна оперативно перемкнути ціль публікації командою /dest
+# Оперативна ціль публікації (можна змінити /dest)
 PUBLISH_CHAT_ID = CHANNEL_ID
 
 missing = []
@@ -67,6 +68,8 @@ THREAD_NO = 1
 
 # ============================= УТИЛІТИ ===============================
 
+URL_RE = re.compile(r'(https?://\S+)')
+
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
@@ -76,15 +79,26 @@ def ensure_draft(user_id: int) -> Dict[str, Any]:
     return DRAFTS[user_id]
 
 def parse_item_line(text: str) -> Dict[str, str]:
-    """Парсимо рядок: 'Назва | Ціна | плюс' або 'Назва - ціна' або просто 'Назва'."""
+    """
+    Парсимо позицію з підпису/рядка:
+    'Назва | Ціна | плюс | URL' або просто з URL у будь-якому місці.
+    """
+    text = (text or "").strip()
+    m = URL_RE.search(text)
+    url = m.group(1) if m else ""
+    if url:
+        text = URL_RE.sub("", text).strip()
+
     for sep in ["—", "–", "  |  ", " | ", " - ", " — ", " – "]:
         text = text.replace(sep, "|")
     text = text.replace(" |", "|").replace("| ", "|").replace(" -", "|").replace("- ", "|")
+
     parts = [p.strip() for p in text.split("|") if p.strip()]
     title = parts[0] if parts else "Без назви"
     price = parts[1] if len(parts) > 1 else ""
     note  = parts[2] if len(parts) > 2 else ""
-    return {"title": title, "price": price, "note": note}
+
+    return {"title": title, "price": price, "note": note, "url": url, "photo_id": ""}
 
 def render_items(items: List[Dict[str, str]]) -> str:
     if not items:
@@ -97,12 +111,23 @@ def render_items(items: List[Dict[str, str]]) -> str:
         if it.get("note"):
             tail.append(it["note"])
         out.append(f"{i}) {it['title']}" + ((" — " + " — ".join(tail)) if tail else ""))
+        if it.get("url"):
+            out.append(it["url"])
     return "\n".join(out)
 
 def render_post(items: List[Dict[str, str]]) -> str:
     header = "Нове надходження\n"
     link = f"Дивись всі новинки: {NEW_ARRIVALS_URL}\n"
     return f"{header}\n{link}\n{render_items(items)}"
+
+def render_caption(item: Dict[str, str], idx: int | None = None) -> str:
+    line = f"{idx}) {item['title']}" if idx else item["title"]
+    tail = []
+    if item.get("price"): tail.append(item["price"])
+    if item.get("note"):  tail.append(item["note"])
+    if tail: line += " — " + " — ".join(tail)
+    if item.get("url"):  line += "\n" + item["url"]
+    return line
 
 def kb_main_admin() -> InlineKeyboardMarkup:
     kb = [
@@ -172,6 +197,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Адмін-команди:",
             "• /new /list /clear /preview /publish — робота з новинками",
             "• /dest — керування ціллю публікації (here|env|<id>)",
+            "• Щоб додати позицію з фото — надішли фото з підписом: 'Назва | Ціна | плюс | URL'",
         ]
     await update.effective_message.reply_text("\n".join(txt), reply_markup=USER_KB)
 
@@ -328,6 +354,16 @@ async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     draft = ensure_draft(update.effective_user.id)
     await update.effective_message.reply_text(render_post(draft["items"]), disable_web_page_preview=False)
 
+    # фотопрев'ю перших до 10 фото
+    media = []
+    for i, it in enumerate(draft["items"], 1):
+        if it.get("photo_id"):
+            media.append(InputMediaPhoto(media=it["photo_id"], caption=render_caption(it, i)))
+        if len(media) == 10:
+            break
+    if media:
+        await update.effective_message.reply_media_group(media=media)
+
 async def cmd_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
@@ -338,7 +374,28 @@ async def cmd_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not draft["items"]:
         await update.effective_message.reply_text("Список порожній. Додайте хоча б одну позицію.")
         return
-    await context.bot.send_message(PUBLISH_CHAT_ID, render_post(draft["items"]), disable_web_page_preview=False)
+
+    # Заголовок + лінк
+    await context.bot.send_message(PUBLISH_CHAT_ID, f"Нове надходження\n\nДивись всі новинки: {NEW_ARRIVALS_URL}")
+
+    # Відправляємо позиції: фото серіями (по 10), без фото — текстом
+    batch: List[InputMediaPhoto] = []
+    idx = 1
+    for it in draft["items"]:
+        if it.get("photo_id"):
+            batch.append(InputMediaPhoto(media=it["photo_id"], caption=render_caption(it, idx)))
+            if len(batch) == 10:
+                await context.bot.send_media_group(PUBLISH_CHAT_ID, media=batch)
+                batch.clear()
+        else:
+            if batch:
+                await context.bot.send_media_group(PUBLISH_CHAT_ID, media=batch)
+                batch.clear()
+            await context.bot.send_message(PUBLISH_CHAT_ID, render_caption(it, idx), disable_web_page_preview=False)
+        idx += 1
+    if batch:
+        await context.bot.send_media_group(PUBLISH_CHAT_ID, media=batch)
+
     await update.effective_message.reply_text("Опубліковано ✅", reply_markup=kb_main_admin())
 
 async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -357,8 +414,9 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "na:add_hint":
         await query.message.reply_text(
             "Надішліть позицію одним рядком:\n"
-            "Назва | Ціна | плюс\n\n"
-            "Можна вставити одразу кілька рядків — кожен стане окремою позицією."
+            "Назва | Ціна | плюс | URL (за бажанням)\n\n"
+            "Можна вставити одразу кілька рядків — кожен стане окремою позицією.\n"
+            "Позицію з фото додайте як «фото з підписом» у такому ж форматі."
         )
         return
     if data == "na:clear_confirm":
@@ -375,8 +433,8 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not PUBLISH_CHAT_ID:
             await query.message.reply_text("Ціль публікації не задана. /dest here або /dest <id>.")
             return
-        await context.bot.send_message(PUBLISH_CHAT_ID, render_post(draft["items"]), disable_web_page_preview=False)
-        await query.message.reply_text("Опубліковано ✅", reply_markup=kb_main_admin())
+        # делегуємо на cmd_publish для однакової поведінки
+        await cmd_publish(update, context)
         return
     if data == "na:edit":
         if not draft["items"]:
@@ -436,7 +494,23 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=kb_edit(draft["cursor"], len(items)),
             )
 
-# Текстові рядки від адміна для списку новинок (додаємо позиції)
+# ---- Адмін: додавання позиції з фото (підпис — як у звичайного рядка) ----
+async def on_admin_photo_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update.effective_user.id):
+        return
+    caption = update.message.caption or ""
+    item = parse_item_line(caption)
+    file_id = update.message.photo[-1].file_id if update.message.photo else ""
+    item["photo_id"] = file_id
+    draft = ensure_draft(update.effective_user.id)
+    draft["items"].append(item)
+    await update.effective_message.reply_text(
+        "Додано позицію з фото.\n\nПоточний список:\n" + render_items(draft["items"]),
+        reply_markup=kb_main_admin(),
+        disable_web_page_preview=True,
+    )
+
+# ---- Адмін: додавання позицій текстом (можна пачкою) ----
 async def on_admin_list_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
@@ -470,6 +544,9 @@ def main() -> None:
 
     # Адмін: відповіді реплаєм на службові повідомлення клієнтів
     app.add_handler(MessageHandler(filters.REPLY & filters.User(list(ADMIN_IDS)), on_admin_reply))
+
+    # Адмін: додавання позицій з фото (через підпис до фото) — ПЕРЕД текстовим хендлером
+    app.add_handler(MessageHandler(filters.PHOTO & filters.User(list(ADMIN_IDS)), on_admin_photo_item))
 
     # Адмін: додавання позицій текстом (ставимо ПЕРЕД загальними текстами)
     app.add_handler(MessageHandler(filters.TEXT & filters.User(list(ADMIN_IDS)) & ~filters.COMMAND, on_admin_list_text))
