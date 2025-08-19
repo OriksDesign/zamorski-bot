@@ -377,10 +377,8 @@ async def cmd_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.effective_message.reply_text("Список порожній. Додайте хоча б одну позицію.")
         return
 
-    # Заголовок + лінк
     await context.bot.send_message(PUBLISH_CHAT_ID, f"Нове надходження\n\nДивись всі новинки: {NEW_ARRIVALS_URL}")
 
-    # Відправляємо позиції: фото серіями (по 10), без фото — текстом
     batch: List[InputMediaPhoto] = []
     idx = 1
     for it in draft["items"]:
@@ -389,6 +387,11 @@ async def cmd_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if len(batch) == 10:
                 await context.bot.send_media_group(PUBLISH_CHAT_ID, media=batch)
                 batch.clear()
+        elif it.get("doc_id"):
+            if batch:
+                await context.bot.send_media_group(PUBLISH_CHAT_ID, media=batch)
+                batch.clear()
+            await context.bot.send_document(PUBLISH_CHAT_ID, it["doc_id"], caption=render_caption(it, idx))
         else:
             if batch:
                 await context.bot.send_media_group(PUBLISH_CHAT_ID, media=batch)
@@ -399,6 +402,7 @@ async def cmd_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await context.bot.send_media_group(PUBLISH_CHAT_ID, media=batch)
 
     await update.effective_message.reply_text("Опубліковано ✅", reply_markup=kb_main_admin())
+
 
 async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -564,4 +568,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
