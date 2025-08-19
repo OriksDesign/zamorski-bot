@@ -524,11 +524,12 @@ def main() -> None:
     # Користувацькі кнопки (реплай-клавіатура)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_buttons))
 
-    # Сапорт: очікуємо питання користувача (будь-який контент)
-    app.add_handler(MessageHandler(
-        (filters.TEXT | filters.PHOTO | filters.DOCUMENT | filters.VIDEO | filters.VOICE) & ~filters.COMMAND,
-        on_user_message
-    ))
+# ловимо або текст, або будь-які вкладення, але не команди
+app.add_handler(MessageHandler(
+    (filters.TEXT | filters.ATTACHMENT) & ~filters.COMMAND,
+    on_user_message
+))
+
 
     # Адмін відповідає реплаєм на службове повідомлення — перешлемо клієнту
     app.add_handler(MessageHandler(filters.REPLY & filters.User(list(ADMIN_IDS)), on_admin_reply))
@@ -541,3 +542,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
