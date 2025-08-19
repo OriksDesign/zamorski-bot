@@ -1,400 +1,392 @@
-import os
+# bot_ru.py
+# -*- coding: utf-8 -*-
+# Телеграм-бот для подготовки поста «Новое поступление» и удобной замены позиций местами.
+# Требуется python-telegram-bot >= 20.0
+# 1) Установить: pip install python-telegram-bot==21.4
+# 2) Заменить значения в секции НАСТРОЙКИ ниже.
+# 3) Запуск: python bot_ru.py
+
+from __future__ import annotations
+
 import asyncio
 import logging
-from typing import Optional, List
+from typing import Dict, List, Any
 
-import pymysql
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command, CommandStart
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-from aiogram.types import ForceReply
+from telegram import (
+    Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
 
+# ------------------------- НАСТРОЙКИ -------------------------
+import os
+from dotenv import load_dotenv  # pip install python-dotenv
 
+load_dotenv()  # підхоплює змінні з .env якщо він існує
 
-# ----------------------------- Конфігурація -----------------------------
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
+# ADMIN_IDS у вигляді "111,222,333"
+ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x}
+NEW_ARRIVALS_URL = os.getenv(
+    "NEW_ARRIVALS_URL",
+    "https://zamorskiepodarki.com/uk/novoe-postuplenie/"
+)
 
-API_TOKEN = os.getenv("API_TOKEN", "").strip()
+if not TOKEN or CHANNEL_ID == 0 or not ADMIN_IDS:
+    raise SystemExit(
+        "Не задані TELEGRAM_TOKEN або CHANNEL_ID або ADMIN_IDS. "
+        "Створи .env або задай змінні середовища."
+    )
+# -------------------------------------------------------------
 
-# Підтримка одного або кількох адміністраторів
-ADMIN_IDS: set[int] = set()
-_single = os.getenv("ADMIN_ID", "").strip()
-if _single:
-    try:
-        ADMIN_IDS.add(int(_single))
-    except ValueError:
-        pass
-for part in os.getenv("ADMIN_IDS", "").split(","):
-    part = part.strip()
-    if part:
-        try:
-            ADMIN_IDS.add(int(part))
-        except ValueError:
-            pass
-
-# Первинний адмін для тредів (reply)
-ADMIN_ID_PRIMARY: Optional[int] = None
-if _single:
-    try:
-        ADMIN_ID_PRIMARY = int(_single)
-    except Exception:
-        ADMIN_ID_PRIMARY = None
-if ADMIN_ID_PRIMARY is None and ADMIN_IDS:
-    ADMIN_ID_PRIMARY = min(ADMIN_IDS)  # стабільний вибір
-
-if not API_TOKEN:
-    raise RuntimeError("Не задано API_TOKEN у змінних середовища")
-if not ADMIN_IDS:
-    raise RuntimeError("Не задано ADMIN_ID або ADMIN_IDS у змінних середовища")
 
 logging.basicConfig(
-    level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=logging.INFO,
 )
-logger = logging.getLogger("zamorski-bot")
+log = logging.getLogger("new_arrivals_bot_ru")
+
+# Черновики по пользователям-админам.
+# draft = {"items": [{"title": str, "price": str, "note": str}], "cursor": int}
+DRAFTS: Dict[int, Dict[str, Any]] = {}
 
 
-def is_admin(uid: int) -> bool:
-    return uid in ADMIN_IDS
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
 
-# --------------------- Підключення до MySQL з автопінгом ---------------------
+def ensure_draft(user_id: int) -> Dict[str, Any]:
+    if user_id not in DRAFTS:
+        DRAFTS[user_id] = {"items": [], "cursor": 0}
+    return DRAFTS[user_id]
 
-class MySQL:
-    def __init__(self):
-        self.host = os.getenv("DB_HOST")
-        self.user = os.getenv("DB_USER")
-        self.password = os.getenv("DB_PASSWORD")
-        self.database = os.getenv("DB_NAME")
-        self.conn: Optional[pymysql.connections.Connection] = None
-        self.connect()
 
-    def connect(self):
-        self.conn = pymysql.connect(
-            host=self.host,
-            user=self.user,
-            password=self.password,
-            database=self.database,
-            charset="utf8mb4",
-            autocommit=True,
-            cursorclass=pymysql.cursors.DictCursor,
-            connect_timeout=10,
-            read_timeout=20,
-            write_timeout=20,
-        )
-        logger.info("✅ MySQL connected")
+def parse_item_line(text: str) -> Dict[str, str]:
+    """
+    Принимает строку вида:
+      "Название | Цена | комментарий"
+      "Название - цена"
+      "Название"
+    Возвращает dict с ключами title, price, note.
+    """
+    # Унифицируем разделители
+    for sep in ["—", "–", "  |  ", " | ", " - ", " — ", " – "]:
+        text = text.replace(sep, "|")
+    # Подстрахуемся по одинарным
+    text = text.replace(" |", "|").replace("| ", "|").replace(" -", "|").replace("- ", "|")
+    parts = [p.strip() for p in text.split("|") if p.strip()]
+    title = parts[0] if parts else "Без названия"
+    price = parts[1] if len(parts) > 1 else ""
+    note = parts[2] if len(parts) > 2 else ""
+    return {"title": title, "price": price, "note": note}
 
-    def cursor(self):
-        if self.conn is None or not self.conn.open:
-            self.connect()
+
+def render_items(items: List[Dict[str, str]]) -> str:
+    lines = []
+    for i, it in enumerate(items, 1):
+        tail = []
+        if it.get("price"):
+            tail.append(it["price"])
+        if it.get("note"):
+            tail.append(it["note"])
+        if tail:
+            lines.append(f"{i}) {it['title']} - " + " - ".join(tail))
         else:
-            try:
-                self.conn.ping(reconnect=True)
-            except Exception:
-                self.connect()
-        return self.conn.cursor()
-
-    def close(self):
-        try:
-            if self.conn:
-                self.conn.close()
-                logger.info("✅ MySQL connection closed")
-        except Exception as e:
-            logger.warning(f"Close MySQL failed: {e}")
+            lines.append(f"{i}) {it['title']}")
+    return "\n".join(lines) if lines else "Список пуст. Добавьте позиции."
 
 
-db = MySQL()
-
-# Ініціалізація таблиць
-with db.cursor() as cur:
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS subscribers (
-            user_id BIGINT PRIMARY KEY,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS operator_threads (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            user_id BIGINT NOT NULL,
-            question TEXT NOT NULL,
-            admin_message_id BIGINT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-        """
-    )
+def render_post(items: List[Dict[str, str]]) -> str:
+    header = "Новое поступление\n"
+    link = f"Смотри все новинки: {NEW_ARRIVALS_URL}\n"
+    body = render_items(items)
+    return f"{header}\n{link}\n{body}"
 
 
-# ----------------------------- Хелпери БД -----------------------------
-
-def add_subscriber(user_id: int) -> None:
-    with db.cursor() as cur:
-        cur.execute(
-            "INSERT INTO subscribers (user_id) VALUES (%s) "
-            "ON DUPLICATE KEY UPDATE user_id=user_id",
-            (user_id,),
-        )
-
-
-def get_all_subscribers() -> List[int]:
-    with db.cursor() as cur:
-        cur.execute("SELECT user_id FROM subscribers ORDER BY created_at DESC")
-        return [row["user_id"] for row in cur.fetchall()]
-
-
-def remove_subscriber(user_id: int) -> None:
-    with db.cursor() as cur:
-        cur.execute("DELETE FROM subscribers WHERE user_id=%s", (user_id,))
-
-
-# ------------------------------- FSM стани -------------------------------
-
-class SendBroadcast(StatesGroup):
-    waiting_content = State()
-
-
-class OperatorQuestion(StatesGroup):
-    waiting_text = State()
-
-
-# --------------------------- Бот і диспетчер ---------------------------
-
-bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
-
-
-# Головна клавіатура
-def main_kb(user_id: int) -> ReplyKeyboardMarkup:
-    rows = [
-        [KeyboardButton(text="Умови співпраці")],
-        [KeyboardButton(text="Питання оператору")],
-        [KeyboardButton(text="Новинки")],
-        [KeyboardButton(text="Підписатися на розсилку")],
+def kb_main() -> InlineKeyboardMarkup:
+    kb = [
+        [
+            InlineKeyboardButton("➕ Добавить позицию", callback_data="na:add_hint"),
+            InlineKeyboardButton("🗑 Очистить список", callback_data="na:clear_confirm"),
+        ],
+        [
+            InlineKeyboardButton("🧭 Редактировать порядок", callback_data="na:edit"),
+        ],
+        [
+            InlineKeyboardButton("👁 Предпросмотр", callback_data="na:preview"),
+            InlineKeyboardButton("📣 Опубликовать", callback_data="na:publish"),
+        ],
+        [
+            InlineKeyboardButton("🔗 Открыть раздел новинок", url=NEW_ARRIVALS_URL),
+        ],
     ]
-    if is_admin(user_id):
-        rows.append([KeyboardButton(text="Зробити розсилку")])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
+    return InlineKeyboardMarkup(kb)
 
 
-async def notify_admin(text: str):
-    for aid in ADMIN_IDS:
-        try:
-            await bot.send_message(aid, text)
-        except Exception as e:
-            logger.warning(f"Не вдалося надіслати адміну {aid}: {e}")
+def kb_edit(cursor: int, total: int) -> InlineKeyboardMarkup:
+    left_disabled = cursor <= 0
+    right_disabled = cursor >= (total - 1)
+
+    btn_prev = InlineKeyboardButton("◀", callback_data="na:nav_prev" if not left_disabled else "na:nop")
+    btn_next = InlineKeyboardButton("▶", callback_data="na:nav_next" if not right_disabled else "na:nop")
+
+    kb = [
+        [btn_prev, InlineKeyboardButton(f"Позиция {cursor + 1} из {total}", callback_data="na:nop"), btn_next],
+        [
+            InlineKeyboardButton("⬆️ Выше", callback_data="na:up"),
+            InlineKeyboardButton("⬇️ Ниже", callback_data="na:down"),
+            InlineKeyboardButton("❌ Удалить", callback_data="na:del"),
+        ],
+        [
+            InlineKeyboardButton("🔙 Готово", callback_data="na:done"),
+        ],
+    ]
+    return InlineKeyboardMarkup(kb)
 
 
-# --------------------------- Команди та хендлери ---------------------------
-
-@dp.message(CommandStart())
-async def start(message: types.Message):
-    add_subscriber(message.from_user.id)
-    await message.answer(
-        "Вітаємо у магазині Заморські подарунки! Оберіть дію нижче.",
-        reply_markup=main_kb(message.from_user.id),
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("Доступ ограничен.")
+        return
+    ensure_draft(user.id)
+    await update.message.reply_text(
+        "Привет. Готов собрать пост «Новое поступление».\n"
+        "Отправляй позиции по одной строкой в формате:\n"
+        "Название | Цена | плюс (необязательно)\n\n"
+        "Пример:\n"
+        "Аромалампа Лотос | 399 грн | керамика, 12 см\n\n"
+        "Команды:\n"
+        "/new - начать новый список\n"
+        "/list - показать список\n"
+        "/clear - очистить список\n"
+        "/preview - предпросмотр\n"
+        "/publish - опубликовать\n\n"
+        "Или используй кнопки ниже.",
+        reply_markup=kb_main(),
     )
 
 
-@dp.message(Command("menu"))
-async def menu(message: types.Message):
-    await message.answer("Головне меню", reply_markup=main_kb(message.from_user.id))
+async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not is_admin(user.id):
+        return
+    DRAFTS[user.id] = {"items": [], "cursor": 0}
+    await update.message.reply_text("Создан новый пустой список новинок.", reply_markup=kb_main())
 
 
-@dp.message(Command("whoami"))
-async def whoami(message: types.Message):
-    status = "так" if is_admin(message.from_user.id) else "ні"
-    text = (
-        f"Ваш user_id: <code>{message.from_user.id}</code>\n"
-        f"Адмін: {status}"
+async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not is_admin(user.id):
+        return
+    draft = ensure_draft(user.id)
+    await update.message.reply_text(render_items(draft["items"]), disable_web_page_preview=True)
+
+
+async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not is_admin(user.id):
+        return
+    DRAFTS[user.id] = {"items": [], "cursor": 0}
+    await update.message.reply_text("Список очищен.", reply_markup=kb_main())
+
+
+async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not is_admin(user.id):
+        return
+    draft = ensure_draft(user.id)
+    await update.message.reply_text(render_post(draft["items"]), disable_web_page_preview=False)
+
+
+async def cmd_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not is_admin(user.id):
+        return
+    draft = ensure_draft(user.id)
+    text = render_post(draft["items"])
+    if not draft["items"]:
+        await update.message.reply_text("Список пуст. Добавьте хотя бы одну позицию.")
+        return
+    await context.bot.send_message(CHANNEL_ID, text, disable_web_page_preview=False)
+    await update.message.reply_text("Опубликовано в канал.", reply_markup=kb_main())
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not is_admin(user.id):
+        return
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+    draft = ensure_draft(user.id)
+
+    # Поддержка множественных строк разом (вставили список)
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    added = 0
+    for ln in lines:
+        item = parse_item_line(ln)
+        draft["items"].append(item)
+        added += 1
+
+    await update.message.reply_text(
+        f"Добавлено позиций: {added}\n\nТекущий список:\n{render_items(draft['items'])}",
+        reply_markup=kb_main(),
+        disable_web_page_preview=True,
     )
-    await message.answer(text)
 
 
-@dp.message(F.text == "Умови співпраці")
-async def terms(message: types.Message):
-    text = (
-        "Наші умови співпраці:\n"
-        "- Доставка по Україні службою Нова пошта\n"
-        "- Оплата: на рахунок або при отриманні\n"
-        "- У разі виявлення браку — надішліть фото; запропонуємо обмін або повернення коштів\n"
-        "Якщо маєте питання — натисніть \"Питання оператору\""
-    )
-    await message.answer(text)
+async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
 
-
-@dp.message(F.text == "Новинки")
-async def news(message: types.Message):
-    kb = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [types.InlineKeyboardButton(text="Відкрити сайт", url="https://zamorskiepodarki.com/uk")]
-        ]
-    )
-    await message.answer("Слідкуйте за новинками на нашому сайті.", reply_markup=kb)
-
-
-@dp.message(F.text == "Підписатися на розсилку")
-async def subscribe(message: types.Message):
-    add_subscriber(message.from_user.id)
-    await message.answer("Готово. Ви у списку розсилки.")
-
-
-# ----------------------- Питання оператору -----------------------
-
-@dp.message(F.text == "Питання оператору")
-async def ask_operator(message: types.Message, state: FSMContext):
-    await message.answer("Напишіть ваше питання. Ми відповімо якнайшвидше.")
-    await state.set_state(OperatorQuestion.waiting_text)
-
-
-@dp.message(OperatorQuestion.waiting_text)
-async def got_question(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    text = message.text or ""
-
-    with db.cursor() as cur:
-        cur.execute(
-            "INSERT INTO operator_threads (user_id, question) VALUES (%s, %s)",
-            (user_id, text),
-        )
-        thread_id = cur.lastrowid
-
-    note = (
-        f"Питання від користувача <code>{user_id}</code>\n"
-        f"Thread #{thread_id}\n\n{text}"
-    )
-    sent = await bot.send_message(
-    ADMIN_ID_PRIMARY,
-    note,
-    reply_markup=ForceReply(input_field_placeholder="Напишіть відповідь користувачу…")
-)
-
-    with db.cursor() as cur:
-        cur.execute(
-            "UPDATE operator_threads SET admin_message_id=%s WHERE id=%s",
-            (sent.message_id, thread_id),
-        )
-
-    await message.answer("Ваше питання надіслано оператору. Дякуємо за звернення.",
-                     reply_markup=main_kb(user_id))
-    await state.clear()
-
-
-# ----------------------- Відповіді адміна -----------------------
-
-@dp.message()
-async def admin_router(message: types.Message, state: FSMContext):
-    # Пропускаємо неадмінів
-    if not is_admin(message.from_user.id):
+    if not is_admin(user.id):
+        await query.answer("Нет доступа")
         return
 
-    # 1) Реплай на повідомлення бота з питанням
-    if message.reply_to_message and message.reply_to_message.message_id:
-        admin_msg_id = message.reply_to_message.message_id
-        with db.cursor() as cur:
-            cur.execute(
-                "SELECT user_id FROM operator_threads "
-                "WHERE admin_message_id=%s ORDER BY id DESC LIMIT 1",
-                (admin_msg_id,),
+    await query.answer()
+    draft = ensure_draft(user.id)
+    data = query.data or "na:nop"
+
+    if data == "na:nop":
+        return
+
+    if data == "na:add_hint":
+        await query.message.reply_text(
+            "Отправьте позицию одной строкой:\n"
+            "Название | Цена | плюс\n\n"
+            "Можно вставить сразу несколько строк — каждая станет отдельной позицией."
+        )
+        return
+
+    if data == "na:clear_confirm":
+        DRAFTS[user.id] = {"items": [], "cursor": 0}
+        await query.message.reply_text("Список очищен.", reply_markup=kb_main())
+        return
+
+    if data == "na:preview":
+        await query.message.reply_text(render_post(draft["items"]), disable_web_page_preview=False)
+        return
+
+    if data == "na:publish":
+        if not draft["items"]:
+            await query.message.reply_text("Список пуст. Добавьте хотя бы одну позицию.")
+            return
+        await context.bot.send_message(CHANNEL_ID, render_post(draft["items"]), disable_web_page_preview=False)
+        await query.message.reply_text("Опубликовано в канал.", reply_markup=kb_main())
+        return
+
+    if data == "na:edit":
+        if not draft["items"]:
+            await query.message.reply_text("Список пуст. Сначала добавьте позиции.")
+            return
+        idx = max(0, min(draft["cursor"], len(draft["items"]) - 1))
+        draft["cursor"] = idx
+        it = draft["items"][idx]
+        await query.message.reply_text(
+            f"Редактирование порядка.\nТекущая позиция {idx + 1}/{len(draft['items'])}:\n"
+            f"{it['title']}" + (f" - {it['price']}" if it.get("price") else "") + (f" - {it['note']}" if it.get("note") else ""),
+            reply_markup=kb_edit(idx, len(draft["items"])),
+        )
+        return
+
+    if data in {"na:nav_prev", "na:nav_next", "na:up", "na:down", "na:del", "na:done"}:
+        items = draft["items"]
+        if not items:
+            await query.message.reply_text("Список пуст.")
+            return
+        idx = draft["cursor"]
+
+        if data == "na:nav_prev":
+            idx = max(0, idx - 1)
+            draft["cursor"] = idx
+
+        elif data == "na:nav_next":
+            idx = min(len(items) - 1, idx + 1)
+            draft["cursor"] = idx
+
+        elif data == "na:up":
+            if idx > 0:
+                items[idx - 1], items[idx] = items[idx], items[idx - 1]
+                idx = idx - 1
+                draft["cursor"] = idx
+
+        elif data == "na:down":
+            if idx < len(items) - 1:
+                items[idx + 1], items[idx] = items[idx], items[idx + 1]
+                idx = idx + 1
+                draft["cursor"] = idx
+
+        elif data == "na:del":
+            removed = items.pop(idx)
+            if idx >= len(items):
+                idx = max(0, len(items) - 1)
+            draft["cursor"] = idx
+            await query.message.reply_text(
+                f"Удалено: {removed['title']}\n\nТекущий список:\n{render_items(items)}",
+                disable_web_page_preview=True,
             )
-            row = cur.fetchone()
-        if row:
-            uid = int(row["user_id"])
-            try:
-                if message.photo:
-                    await bot.send_photo(uid, message.photo[-1].file_id,
-                     caption=message.caption or "",
-                     reply_markup=main_kb(uid))
-                else:
-                    await bot.send_message(uid, message.text or "",
-                       reply_markup=main_kb(uid))
-                await message.reply("Надіслано користувачу")
-                return
-            except TelegramForbiddenError:
-                await message.reply("Користувач заблокував бота або недоступний")
-                return
-            except Exception as e:
-                await message.reply(f"Помилка відправки: {e}")
+            if not items:
+                await query.message.reply_text("Список пуст.", reply_markup=kb_main())
                 return
 
-    # 2) Команда без reply: /reply <user_id> <текст>
-    if message.text and message.text.startswith("/reply"):
-        parts = message.text.split(maxsplit=2)
-        if len(parts) >= 3 and parts[1].isdigit():
-            uid = int(parts[1])
-            txt = parts[2]
-            try:
-                await bot.send_message(uid, txt)
-                await message.reply("Надіслано користувачу")
-            except Exception as e:
-                await message.reply(f"Помилка відправки: {e}")
+        elif data == "na:done":
+            await query.message.reply_text("Готово. Возврат в меню.", reply_markup=kb_main())
             return
 
-    # 3) Кнопка розсилки
-    if message.text == "Зробити розсилку":
-        await message.answer("Надішліть текст або фото з підписом для розсилки.")
-        await state.set_state(SendBroadcast.waiting_content)
-
-
-# --------------------------- Розсилка ---------------------------
-
-@dp.message(SendBroadcast.waiting_content, F.photo)
-async def broadcast_photo(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
+        # Обновим карточку редактирования
+        if items:
+            it = items[draft["cursor"]]
+            await query.message.reply_text(
+                f"Позиция {draft['cursor'] + 1}/{len(items)}:\n"
+                f"{it['title']}" + (f" - {it['price']}" if it.get("price") else "") + (f" - {it['note']}" if it.get("note") else ""),
+                reply_markup=kb_edit(draft["cursor"], len(items)),
+            )
         return
-    await do_broadcast(photo_id=message.photo[-1].file_id, caption=message.caption or "")
-    await state.clear()
 
 
-@dp.message(SendBroadcast.waiting_content)
-async def broadcast_text(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update.effective_user.id):
         return
-    await do_broadcast(text=message.text or "")
-    await state.clear()
+    await update.message.reply_text(
+        "Команды:\n"
+        "/start — меню\n"
+        "/new — новый список\n"
+        "/list — показать список\n"
+        "/clear — очистить список\n"
+        "/preview — предпросмотр\n"
+        "/publish — опубликовать\n\n"
+        "Отправляйте позиции строками: «Название | Цена | плюс»."
+    )
 
 
-async def do_broadcast(text: str = "", photo_id: Optional[str] = None, caption: str = ""):
-    users = get_all_subscribers()
-    ok = 0
-    blocked = 0
+def main() -> None:
+    app: Application = ApplicationBuilder().token(TOKEN).build()
 
-    for uid in users:
-        try:
-            if photo_id:
-                await bot.send_photo(uid, photo_id, caption=caption)
-            else:
-                await bot.send_message(uid, txt, reply_markup=main_kb(uid))
-            ok += 1
-        except TelegramRetryAfter as e:
-            await asyncio.sleep(e.retry_after + 1)
-            continue
-        except (TelegramForbiddenError, TelegramBadRequest):
-            blocked += 1
-            remove_subscriber(uid)
-        except Exception as e:
-            logger.warning(f"Broadcast to {uid} failed: {e}")
-        await asyncio.sleep(0.05)  # антифлуд
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("new", cmd_new))
+    app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("clear", cmd_clear))
+    app.add_handler(CommandHandler("preview", cmd_preview))
+    app.add_handler(CommandHandler("publish", cmd_publish))
 
-    await notify_admin(f"Розсилка завершена. Успішно: {ok}, видалено зі списку: {blocked}.")
+    app.add_handler(CallbackQueryHandler(on_cb))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-
-# ----------------------------- Точка входу -----------------------------
-
-async def main():
-    try:
-        await dp.start_polling(bot)
-    finally:
-        db.close()
+    log.info("Bot started")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
-
-
+    main()
