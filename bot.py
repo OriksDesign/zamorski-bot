@@ -9,8 +9,6 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardMarkup,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
     ForceReply,
 )
 from aiogram.fsm.context import FSMContext
@@ -160,12 +158,8 @@ def remove_subscriber(user_id: int) -> None:
 
 # ------------------------------- FSM стани -------------------------------
 
-class SendBroadcast(StatesGroup):
-    waiting_content = State()
-
-
 class OperatorQuestion(StatesGroup):
-    waiting_text = State()
+    waiting_text = State()   # очікуємо текст питання
 
 
 # --------------------------- Бот і диспетчер ---------------------------
@@ -179,11 +173,9 @@ def main_kb(user_id: int) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text="Умови співпраці")],
         [KeyboardButton(text="Питання оператору")],
-        [KeyboardButton(text="Новинки")],
-        [KeyboardButton(text="Підписатися на розсилку")],
+        [KeyboardButton(text="Питання рахунку")],
+        [KeyboardButton(text="Питання щодо ТТН")],
     ]
-    if is_admin(user_id):
-        rows.append([KeyboardButton(text="Зробити розсилку")])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -199,7 +191,7 @@ async def notify_admin(text: str):
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    add_subscriber(message.from_user.id)
+    add_subscriber(message.from_user.id)  # можна прибрати, якщо не потрібна БД підписників
     await message.answer(
         "Вітаємо у магазині Заморські подарунки! Оберіть дію нижче.",
         reply_markup=main_kb(message.from_user.id),
@@ -233,27 +225,24 @@ async def terms(message: types.Message):
     await message.answer(text, reply_markup=main_kb(message.from_user.id))
 
 
-@dp.message(F.text == "Новинки")
-async def news(message: types.Message):
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Відкрити сайт", url="https://zamorskiepodarki.com/uk")]
-        ]
-    )
-    await message.answer("Слідкуйте за новинками на нашому сайті.", reply_markup=kb)
-
-
-@dp.message(F.text == "Підписатися на розсилку")
-async def subscribe(message: types.Message):
-    add_subscriber(message.from_user.id)
-    await message.answer("Готово. Ви у списку розсилки.", reply_markup=main_kb(message.from_user.id))
-
-
-# ----------------------- Питання оператору -----------------------
+# ---- Три варіанти старту діалогу з оператором: загальний / рахунок / ТТН ----
 
 @dp.message(F.text == "Питання оператору")
-async def ask_operator(message: types.Message, state: FSMContext):
+async def ask_operator_generic(message: types.Message, state: FSMContext):
+    await state.update_data(topic="Загальне")
     await message.answer("Напишіть ваше питання. Ми відповімо якнайшвидше.")
+    await state.set_state(OperatorQuestion.waiting_text)
+
+@dp.message(F.text == "Питання рахунку")
+async def ask_operator_bill(message: types.Message, state: FSMContext):
+    await state.update_data(topic="Рахунок")
+    await message.answer("Опишіть, будь ласка, питання по рахунку (номер замовлення/сума/деталі).")
+    await state.set_state(OperatorQuestion.waiting_text)
+
+@dp.message(F.text == "Питання щодо ТТН")
+async def ask_operator_ttn(message: types.Message, state: FSMContext):
+    await state.update_data(topic="ТТН")
+    await message.answer("Вкажіть номер ТТН або деталі відправлення — перевіримо статус.")
     await state.set_state(OperatorQuestion.waiting_text)
 
 
@@ -261,16 +250,20 @@ async def ask_operator(message: types.Message, state: FSMContext):
 async def got_question(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     text = message.text or ""
+    data = await state.get_data()
+    topic = data.get("topic", "Загальне")
 
+    # Зберігаємо тред і форвардимо адміну
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO operator_threads (user_id, question) VALUES (%s, %s)",
-            (user_id, text),
+            (user_id, f"[Тема: {topic}]\n{text}"),
         )
         thread_id = cur.lastrowid
 
     note = (
         f"Питання від користувача <code>{user_id}</code>\n"
+        f"Тема: <b>{topic}</b>\n"
         f"Thread #{thread_id}\n\n{text}"
     )
     sent = await bot.send_message(
@@ -347,54 +340,6 @@ async def admin_router(message: types.Message, state: FSMContext):
             except Exception as e:
                 await message.reply(f"Помилка відправки: {e}")
             return
-
-    # 3) Кнопка розсилки
-    if message.text == "Зробити розсилку":
-        await message.answer("Надішліть текст або фото з підписом для розсилки.")
-        await state.set_state(SendBroadcast.waiting_content)
-
-
-# --------------------------- Розсилка ---------------------------
-
-@dp.message(SendBroadcast.waiting_content, F.photo)
-async def broadcast_photo(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    await do_broadcast(photo_id=message.photo[-1].file_id, caption=message.caption or "")
-    await state.clear()
-
-
-@dp.message(SendBroadcast.waiting_content)
-async def broadcast_text(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    await do_broadcast(text=message.text or "")
-    await state.clear()
-
-
-async def do_broadcast(text: str = "", photo_id: Optional[str] = None, caption: str = ""):
-    users = get_all_subscribers()
-    ok = 0
-    blocked = 0
-
-    for uid in users:
-        try:
-            if photo_id:
-                await bot.send_photo(uid, photo_id, caption=caption)
-            else:
-                await bot.send_message(uid, text)
-            ok += 1
-        except TelegramRetryAfter as e:
-            await asyncio.sleep(e.retry_after + 1)
-            continue
-        except (TelegramForbiddenError, TelegramBadRequest):
-            blocked += 1
-            remove_subscriber(uid)
-        except Exception as e:
-            logger.warning(f"Broadcast to {uid} failed: {e}")
-        await asyncio.sleep(0.05)  # антифлуд
-
-    await notify_admin(f"Розсилка завершена. Успішно: {ok}, видалено зі списку: {blocked}.")
 
 
 # ----------------------------- Точка входу -----------------------------
