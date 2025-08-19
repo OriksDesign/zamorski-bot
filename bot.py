@@ -1,100 +1,92 @@
+import os
+import asyncio
+import logging
+from typing import Optional, List
 
 
-@dp.message(F.from_user.id.in_(list(ADMIN_IDS)))
-async def admin_router(message: types.Message, state: FSMContext):
-# Відповідь на конкретний тред
-if message.reply_to_message and message.reply_to_message.message_id:
-# Знайдемо тред по admin_message_id
-admin_msg_id = message.reply_to_message.message_id
-with db.cursor() as cur:
-cur.execute(
-"SELECT user_id FROM operator_threads WHERE admin_message_id=%s ORDER BY id DESC LIMIT 1",
-(admin_msg_id,),
+import pymysql
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command, CommandStart
+from aiogram.types import (
+KeyboardButton, ReplyKeyboardMarkup,
 )
-row = cur.fetchone()
-if row:
-uid = int(row["user_id"])
-try:
-if message.photo:
-await bot.send_photo(uid, message.photo[-1].file_id, caption=message.caption or "")
-else:
-await bot.send_message(uid, message.text or "")
-await message.reply("Надіслано користувачу")
-return
-except TelegramForbiddenError:
-await message.reply("Користувач заблокував бота або недоступний")
-return
-except Exception as e:
-await message.reply(f"Помилка відправки: {e}")
-return
-
-
-# Інші адмінські дії
-if message.text == "Зробити розсилку":
-await message.answer("Надішліть текст або фото з підписом для розсилки.")
-await state.set_state(SendBroadcast.waiting_content)
-
-
-
-
-# Хендлери стану розсилки
-@dp.message(SendBroadcast.waiting_content, F.from_user.id.in_(list(ADMIN_IDS)), F.photo)
-async def broadcast_photo(message: types.Message, state: FSMContext):
-await do_broadcast(photo_id=message.photo[-1].file_id, caption=message.caption or "")
-await state.clear()
-
-
-
-
-@dp.message(SendBroadcast.waiting_content, F.from_user.id.in_(list(ADMIN_IDS)))
-async def broadcast_text(message: types.Message, state: FSMContext):
-await do_broadcast(text=message.text or "")
-await state.clear()
-
-
-
-
-async def do_broadcast(text: str = "", photo_id: Optional[str] = None, caption: str = ""):
-users = get_all_subscribers()
-ok = 0
-blocked = 0
-
-
-for uid in users:
-try:
-if photo_id:
-await bot.send_photo(uid, photo_id, caption=caption)
-else:
-await bot.send_message(uid, text)
-ok += 1
-except TelegramRetryAfter as e:
-await asyncio.sleep(e.retry_after + 1)
-continue
-except (TelegramForbiddenError, TelegramBadRequest):
-blocked += 1
-remove_subscriber(uid)
-except Exception as e:
-logger.warning(f"Broadcast to {uid} failed: {e}")
-await asyncio.sleep(0.05) # анти-флуд
-
-
-await notify_admin(f"Розсилка завершена. Успішно: {ok}, видалено зі списку: {blocked}.")
-
-
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
 
 # ---------------------------------------------------------------------------
-# Точка входу
+# Конфігурація
 # ---------------------------------------------------------------------------
-async def main():
+API_TOKEN = os.getenv("API_TOKEN")
+# Підтримка одного або кількох адміністраторів
+ADMIN_IDS = set()
+_admin_single = os.getenv("ADMIN_ID", "").strip()
+if _admin_single:
 try:
-await dp.start_polling(bot)
-finally:
-db.close()
+ADMIN_IDS.add(int(_admin_single))
+except ValueError:
+pass
+_admin_many = os.getenv("ADMIN_IDS", "").split(",")
+for _p in _admin_many:
+_p = _p.strip()
+if _p:
+try:
+ADMIN_IDS.add(int(_p))
+except ValueError:
+pass
 
 
+# Визначаємо первинного адміна: пріоритет ADMIN_ID, інакше мінімальний із ADMIN_IDS
+ADMIN_ID_PRIMARY = None
+if _admin_single:
+try:
+ADMIN_ID_PRIMARY = int(_admin_single)
+except Exception:
+ADMIN_ID_PRIMARY = None
+if ADMIN_ID_PRIMARY is None and ADMIN_IDS:
+ADMIN_ID_PRIMARY = min(ADMIN_IDS)
 
 
-if __name__ == "__main__":
+if not API_TOKEN:
+raise RuntimeError("Не задано API_TOKEN у змінних середовища")
+if not ADMIN_IDS:
+raise RuntimeError("Не задано ADMIN_ID або ADMIN_IDS у змінних середовища")
+
+
+logging.basicConfig(
+level=logging.INFO,
+format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("zamorski-bot")
+
+
+def is_admin(uid: int) -> bool:
+return uid in ADMIN_IDS
+
+
+# ---------------------------------------------------------------------------
+# Підключення до MySQL з авто‑перепідключенням
+# ---------------------------------------------------------------------------
+class MySQL:
+def __init__(self):
+self.host = os.getenv("DB_HOST")
+self.user = os.getenv("DB_USER")
+self.password = os.getenv("DB_PASSWORD")
+self.database = os.getenv("DB_NAME")
+self.conn: Optional[pymysql.connections.Connection] = None
+self.connect()
+
+
+def connect(self):
+self.conn = pymysql.connect(
+host=self.host,
+user=self.user,
+password=self.password,
+database=self.database,
+charset="utf8mb4",
+autocommit=True,
+cursorclass=pymysql.cursors.DictCursor,
 asyncio.run(main())
-
