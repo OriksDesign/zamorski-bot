@@ -188,12 +188,23 @@ async def cmd_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user = update.effective_user
     if not is_admin(user.id):
         return
+
+    # ✅ Захист: якщо CHANNEL_ID не заданий у Render — не падаємо, а підказуємо що зробити
+    if CHANNEL_ID == 0:
+        await update.effective_message.reply_text(
+            "CHANNEL_ID не заданий у Render. Додай змінну CHANNEL_ID і перезапусти сервіс."
+        )
+        return
+
     draft = ensure_draft(user.id)
     if not draft["items"]:
-        await update.effective_message.reply_text("Список пуст. Добавьте хотя бы одну позицию.")
+        await update.effective_message.reply_text("Список порожній. Додайте хоча б одну позицію.")
         return
-    await context.bot.send_message(CHANNEL_ID, render_post(draft["items"]), disable_web_page_preview=False)
-    await update.effective_message.reply_text("Опубликовано в канал.", reply_markup=kb_main())
+
+    text = render_post(draft["items"])
+    await context.bot.send_message(CHANNEL_ID, text, disable_web_page_preview=False)
+    await update.effective_message.reply_text("Опубліковано в канал.", reply_markup=kb_main())
+
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -348,4 +359,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
