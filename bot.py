@@ -1,6 +1,8 @@
 import os
+import re
 import asyncio
 import logging
+import time
 from typing import Optional, List
 
 import pymysql
@@ -21,6 +23,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.dispatcher.middlewares.base import BaseMiddleware
+
 
 # ---------------------------------------------------------------------------
 # Конфігурація
@@ -64,6 +68,7 @@ logger = logging.getLogger("zamorski-bot")
 
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
+
 
 # ---------------------------------------------------------------------------
 # Підключення до MySQL з авто-перепідключенням
@@ -110,6 +115,7 @@ class MySQL:
         except Exception as e:
             logger.warning(f"Close MySQL failed: {e}")
 
+
 db = MySQL()
 
 # Таблиці (якщо не існують)
@@ -134,6 +140,7 @@ with db.cursor() as cur:
         """
     )
 
+
 # ---------------------------------------------------------------------------
 # Хелпери БД
 # ---------------------------------------------------------------------------
@@ -154,6 +161,7 @@ def remove_subscriber(user_id: int) -> None:
     with db.cursor() as cur:
         cur.execute("DELETE FROM subscribers WHERE user_id=%s", (user_id,))
 
+
 # ---------------------------------------------------------------------------
 # FSM стани
 # ---------------------------------------------------------------------------
@@ -163,15 +171,39 @@ class SendBroadcast(StatesGroup):
 class OperatorQuestion(StatesGroup):
     waiting_text = State()
 
+
+# ---------------------------------------------------------------------------
+# Анти-спам (тротлінг) middleware: 1 повідомлення / 0.7s
+# ---------------------------------------------------------------------------
+class ThrottleMiddleware(BaseMiddleware):
+    def __init__(self, rate: float = 0.7):
+        self.rate = rate
+        self._last: dict[int, float] = {}
+
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        if user and user.id:
+            now = time.monotonic()
+            last = self._last.get(user.id, 0.0)
+            if now - last < self.rate:
+                return  # тихо ігноруємо
+            self._last[user.id] = now
+        return await handler(event, data)
+
+
 # ---------------------------------------------------------------------------
 # Бот / Диспетчер
 # ---------------------------------------------------------------------------
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+dp.message.outer_middleware(ThrottleMiddleware(0.7))  # вмикаємо тротлінг
+
 
 # ---------------------------------------------------------------------------
 # Клавіатури
 # ---------------------------------------------------------------------------
+BACK_BTN = "⬅️ Назад у меню"
+
 def main_kb(user_id: int) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text="Умови співпраці")],
@@ -183,6 +215,14 @@ def main_kb(user_id: int) -> ReplyKeyboardMarkup:
         rows.append([KeyboardButton(text="Зробити розсилку")])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
+def back_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=BACK_BTN)]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Команди бота (без /help)
 # ---------------------------------------------------------------------------
@@ -190,6 +230,7 @@ def user_commands() -> list[BotCommand]:
     return [
         BotCommand(command="start", description="Почати / показати меню"),
         BotCommand(command="menu", description="Відкрити меню"),
+        BotCommand(command="cancel", description="Скасувати дію"),
     ]
 
 def admin_commands() -> list[BotCommand]:
@@ -206,6 +247,17 @@ async def setup_bot_commands(bot: Bot):
         except Exception as e:
             logger.warning(f"set_my_commands for admin {aid} failed: {e}")
 
+
+# ---------------------------------------------------------------------------
+# Утиліти
+# ---------------------------------------------------------------------------
+async def typing(chat_id: int):
+    try:
+        await bot.send_chat_action(chat_id, "typing")
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Хендлери
 # ---------------------------------------------------------------------------
@@ -221,23 +273,35 @@ async def start(message: types.Message):
 async def menu(message: types.Message):
     await message.answer("Головне меню", reply_markup=main_kb(message.from_user.id))
 
+@dp.message(Command("cancel"))
+async def cancel(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Скасовано. Повертаю меню.", reply_markup=main_kb(message.from_user.id))
+
 @dp.message(Command("whoami"))
 async def whoami(message: types.Message):
     status = "так" if is_admin(message.from_user.id) else "ні"
     await message.answer(
-        f"Ваш user_id: <code>{message.from_user.id}</code>\nАдмін: {status}"
+        f"Ваш user_id: <code>{message.from_user.id}</code>\nАдмін: {status}",
+        reply_markup=main_kb(message.from_user.id),
     )
+
+@dp.message(F.text == BACK_BTN)
+async def go_back(message: types.Message, state: FSMContext):
+    await state.clear()
+    await menu(message)
+
 
 @dp.message(F.text == "Умови співпраці")
 async def terms(message: types.Message):
     text = (
         "Наші умови співпраці:\n"
-        "- Доставка по Україні службою Нова пошта\n"
-        "- Оплата: на рахунок або при отриманні\n"
-        "- У разі виявлення браку — надішліть фото; запропонуємо обмін або повернення коштів\n"
-        "Якщо маєте питання — натисніть \"Питання оператору\""
+        "• Доставка по Україні службою Нова пошта\n"
+        "• Оплата: на рахунок або при отриманні\n"
+        "• У разі виявлення браку — надішліть фото; запропонуємо обмін або повернення коштів\n\n"
+        "Якщо маєте питання — натисніть «Питання оператору»."
     )
-    await message.answer(text)
+    await message.answer(text, reply_markup=main_kb(message.from_user.id))
 
 @dp.message(F.text == "Новинки")
 async def news(message: types.Message):
@@ -251,16 +315,22 @@ async def news(message: types.Message):
 @dp.message(F.text == "Підписатися на розсилку")
 async def subscribe(message: types.Message):
     add_subscriber(message.from_user.id)
-    await message.answer("Готово. Ви у списку розсилки.")
+    await message.answer("Готово. Ви у списку розсилки.", reply_markup=main_kb(message.from_user.id))
+
 
 # ----------------------- Питання оператору -------------------------------
 @dp.message(F.text == "Питання оператору")
 async def ask_operator(message: types.Message, state: FSMContext):
-    await message.answer("Напишіть ваше питання. Ми відповімо якнайшвидше.")
+    await typing(message.chat.id)
+    await message.answer(
+        "Напишіть ваше питання. Ми відповімо якнайшвидше.",
+        reply_markup=back_kb(),
+    )
     await state.set_state(OperatorQuestion.waiting_text)
 
 @dp.message(OperatorQuestion.waiting_text)
 async def got_question(message: types.Message, state: FSMContext):
+    await typing(message.chat.id)
     user_id = message.from_user.id
     text = message.text or ""
 
@@ -287,8 +357,12 @@ async def got_question(message: types.Message, state: FSMContext):
             (sent.message_id, thread_id),
         )
 
-    await message.answer("Ваше питання надіслано оператору. Дякуємо за звернення.")
+    await message.answer(
+        "Ваше питання надіслано оператору. Дякуємо за звернення.",
+        reply_markup=main_kb(message.from_user.id),
+    )
     await state.clear()
+
 
 # ----------------------- Адмін-роутер ------------------------------------
 @dp.message()
@@ -311,10 +385,11 @@ async def admin_router(message: types.Message, state: FSMContext):
             try:
                 if message.photo:
                     await bot.send_photo(
-                        uid, message.photo[-1].file_id, caption=message.caption or ""
+                        uid, message.photo[-1].file_id, caption=message.caption or "",
+                        reply_markup=main_kb(uid),
                     )
                 else:
-                    await bot.send_message(uid, message.text or "")
+                    await bot.send_message(uid, message.text or "", reply_markup=main_kb(uid))
                 await message.reply("Надіслано користувачу")
                 return
             except TelegramForbiddenError:
@@ -328,10 +403,9 @@ async def admin_router(message: types.Message, state: FSMContext):
     if message.text and message.text.startswith("/reply"):
         parts = message.text.split(maxsplit=2)
         if len(parts) >= 3 and parts[1].isdigit():
-            uid = int(parts[1])
-            txt = parts[2]
+            uid = int(parts[1]); txt = parts[2]
             try:
-                await bot.send_message(uid, txt)
+                await bot.send_message(uid, txt, reply_markup=main_kb(uid))
                 await message.reply("Надіслано користувачу")
             except Exception as e:
                 await message.reply(f"Помилка відправки: {e}")
@@ -339,19 +413,22 @@ async def admin_router(message: types.Message, state: FSMContext):
 
     # 3) Розсилка
     if message.text == "Зробити розсилку":
-        await message.answer("Надішліть текст або фото з підписом для розсилки.")
+        await message.answer("Надішліть текст або фото з підписом для розсилки.", reply_markup=back_kb())
         await state.set_state(SendBroadcast.waiting_content)
+
 
 # ----------------------- Розсилка ----------------------------------------
 @dp.message(SendBroadcast.waiting_content, F.photo)
 async def broadcast_photo(message: types.Message, state: FSMContext):
     await do_broadcast(photo_id=message.photo[-1].file_id, caption=message.caption or "")
     await state.clear()
+    await message.answer("Розсилку завершено ✅", reply_markup=main_kb(message.from_user.id))
 
 @dp.message(SendBroadcast.waiting_content)
 async def broadcast_text(message: types.Message, state: FSMContext):
     await do_broadcast(text=message.text or "")
     await state.clear()
+    await message.answer("Розсилку завершено ✅", reply_markup=main_kb(message.from_user.id))
 
 async def do_broadcast(text: str = "", photo_id: Optional[str] = None, caption: str = ""):
     users = get_all_subscribers()
@@ -383,6 +460,7 @@ async def do_broadcast(text: str = "", photo_id: Optional[str] = None, caption: 
     except Exception:
         pass
 
+
 # ---------------------------------------------------------------------------
 # Точка входу
 # ---------------------------------------------------------------------------
@@ -390,8 +468,8 @@ async def main():
     try:
         # важливо, щоб не було конфлікту webhook/getUpdates
         await bot.delete_webhook(drop_pending_updates=True)
-        await setup_bot_commands(bot)  # без /help
-        await dp.start_polling(bot)
+        await setup_bot_commands(bot)
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         db.close()
 
