@@ -14,6 +14,9 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     ForceReply,
+    BotCommand,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -24,7 +27,6 @@ from aiogram.exceptions import (
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-
 
 # ============================== КОНФІГ =====================================
 
@@ -136,7 +138,6 @@ with db.cursor() as cur:
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """)
-
 
 # =============================== БД-хелпери ================================
 
@@ -256,6 +257,35 @@ def extract_ttn(text: Optional[str]) -> Optional[str]:
     return m.group(0) if m else None
 
 
+# =========================== МЕНЮ / КОМАНДИ ================================
+
+def user_commands() -> list[BotCommand]:
+    return [
+        BotCommand(command="start", description="Почати / показати меню"),
+        BotCommand(command="help", description="Підказки та меню"),
+        BotCommand(command="ttn", description="Запитати ТТН Нової пошти"),
+        BotCommand(command="bill", description="Запитати рахунок для оплати"),
+        BotCommand(command="novinki", description="Нові надходження"),
+    ]
+
+def admin_commands() -> list[BotCommand]:
+    return user_commands() + [
+        BotCommand(command="builder", description="Конструктор новинок"),
+        BotCommand(command="broadcast", description="Зробити розсилку"),
+        BotCommand(command="reply", description="Відповідь: /reply <id> <текст>"),
+    ]
+
+async def setup_bot_commands(bot: Bot):
+    # загальне меню для всіх приватних чатів
+    await bot.set_my_commands(user_commands(), scope=BotCommandScopeAllPrivateChats())
+    # персональні меню адмінам
+    for aid in ADMIN_IDS:
+        try:
+            await bot.set_my_commands(admin_commands(), scope=BotCommandScopeChat(chat_id=aid))
+        except Exception as e:
+            logger.warning(f"set_my_commands for admin {aid} failed: {e}")
+
+
 # ============================ СЕРВІСНІ Ф-ЦІЇ ===============================
 
 async def notify_admin(text: str):
@@ -276,9 +306,16 @@ async def start(message: types.Message):
         reply_markup=main_kb(message.from_user.id),
     )
 
-@dp.message(Command("menu"))
+@dp.message(Command("menu"), Command("help"))
 async def menu(message: types.Message):
-    await message.answer("Головне меню", reply_markup=main_kb(message.from_user.id))
+    text = (
+        "Можливості бота:\n"
+        "• /ttn — запитати ТТН Нової пошти\n"
+        "• /bill — отримати рахунок для оплати\n"
+        "• /novinki — переглянути нові надходження\n\n"
+        "Нижче також є кнопки меню."
+    )
+    await message.answer(text, reply_markup=main_kb(message.from_user.id))
 
 @dp.message(Command("whoami"))
 async def whoami(message: types.Message):
@@ -288,8 +325,33 @@ async def whoami(message: types.Message):
         reply_markup=main_kb(message.from_user.id),
     )
 
+# Командні шорткати
+@dp.message(Command("ttn"))
+async def cmd_ttn(message: types.Message, state: FSMContext):
+    await ttn_start(message, state)
 
-# -------- Користувач
+@dp.message(Command("bill"))
+async def cmd_bill(message: types.Message, state: FSMContext):
+    await bill_start(message, state)
+
+@dp.message(Command("novinki"))
+async def cmd_novinki(message: types.Message):
+    await new_arrivals(message)
+
+@dp.message(Command("builder"))
+async def cmd_builder(message: types.Message):
+    if is_admin(message.from_user.id):
+        await na_open_cmd(message)
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer("Надішліть текст або фото з підписом для розсилки.")
+    await state.set_state(SendBroadcast.waiting_content)
+
+
+# -------- Користувач: кнопки
 
 @dp.message(F.text == "Умови співпраці")
 async def terms(message: types.Message):
@@ -350,7 +412,7 @@ async def got_question(message: types.Message, state: FSMContext):
 
 # ---- ТТН
 
-@dp.message(F.text == "Запитати ТТН Нової пошти")
+@dp.message(F.text == "Запитати ТТН Нової пошти"))
 async def ttn_start(message: types.Message, state: FSMContext):
     await message.answer("Вкажіть ПІБ отримувача (як у замовленні).")
     await state.set_state(TTNRequest.waiting_name)
@@ -398,7 +460,7 @@ async def ttn_got_order(message: types.Message, state: FSMContext):
 
 # ---- Рахунок
 
-@dp.message(F.text == "Запитати рахунок для сплати замовлення")
+@dp.message(F.text == "Запитати рахунок для сплати замовлення"))
 async def bill_start(message: types.Message, state: FSMContext):
     await message.answer("Вкажіть ПІБ платника (як у замовленні).")
     await state.set_state(BillRequest.waiting_name)
@@ -559,7 +621,7 @@ async def admin_router(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
 
-    # 1) Відповідь на службове повідомлення бота (reply)
+    # reply на службове повідомлення бота
     if message.reply_to_message and message.reply_to_message.message_id:
         admin_msg_id = message.reply_to_message.message_id
         with db.cursor() as cur:
@@ -604,7 +666,7 @@ async def admin_router(message: types.Message, state: FSMContext):
                 await message.reply(f"Помилка відправки: {e}")
                 return
 
-    # 2) Альтернатива: /reply <user_id> <текст>
+    # Альтернатива: /reply <user_id> <текст>
     if message.text and message.text.startswith("/reply"):
         parts = message.text.split(maxsplit=2)
         if len(parts) >= 3 and parts[1].isdigit():
@@ -629,7 +691,7 @@ async def admin_router(message: types.Message, state: FSMContext):
                 await message.reply(f"Помилка відправки: {e}")
             return
 
-    # 3) Розсилка з адмін-меню
+    # Розсилка з адмін-меню
     if message.text == "Зробити розсилку":
         await message.answer("Надішліть текст або фото з підписом для розсилки.")
         await state.set_state(SendBroadcast.waiting_content)
@@ -675,8 +737,9 @@ async def do_broadcast(text: str = "", photo_id: Optional[str] = None, caption: 
 
 async def main():
     try:
-        # важливо: прибрати webhook і дропнути чергу
+        # прибираємо webhook і дропаємо чергу, щоб не було конфліктів getUpdates/webhook
         await bot.delete_webhook(drop_pending_updates=True)
+        await setup_bot_commands(bot)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         db.close()
