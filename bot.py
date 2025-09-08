@@ -1,10 +1,11 @@
 import os
 import re
+import csv
+import io
 import asyncio
 import logging
 import time
-from typing import Optional, List
-from collections import defaultdict
+from typing import Optional, List, Tuple
 
 import pymysql
 from aiogram import Bot, Dispatcher, F, types
@@ -18,6 +19,7 @@ from aiogram.types import (
     BotCommand,
     BotCommandScopeAllPrivateChats,
     BotCommandScopeChat,
+    BufferedInputFile,
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -29,6 +31,7 @@ from aiogram.dispatcher.middlewares.base import BaseMiddleware
 # ============================== КОНФІГ =====================================
 
 API_TOKEN = os.getenv("API_TOKEN", "").strip()
+ERROR_CHAT_ID_RAW = os.getenv("ERROR_CHAT_ID", "").strip()  # -100..., @channel або пусто
 
 ADMIN_IDS: set[int] = set()
 _admin_single = os.getenv("ADMIN_ID", "").strip()
@@ -65,8 +68,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger("zamorski-bot")
 
+
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
+
+
+def as_chat_id(raw: str) -> Optional[int | str]:
+    if not raw:
+        return None
+    if raw.startswith("@"):
+        return raw  # username
+    try:
+        return int(raw)
+    except Exception:
+        return raw
+
+
+ERROR_CHAT_ID = as_chat_id(ERROR_CHAT_ID_RAW)
 
 # ====================== MySQL (автоперепідключення) ========================
 
@@ -112,6 +130,7 @@ class MySQL:
         except Exception as e:
             logger.warning(f"Close MySQL failed: {e}")
 
+
 db = MySQL()
 
 # Таблиці (якщо не існують)
@@ -135,6 +154,16 @@ with db.cursor() as cur:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS error_logs (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            place VARCHAR(64) NOT NULL,
+            detail TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
 
 # =============================== БД-хелпери ================================
 
@@ -151,50 +180,61 @@ def get_all_subscribers() -> List[int]:
         cur.execute("SELECT user_id FROM subscribers ORDER BY created_at DESC")
         return [row["user_id"] for row in cur.fetchall()]
 
+def get_subscribers_full() -> List[Tuple[int, str]]:
+    with db.cursor() as cur:
+        cur.execute("SELECT user_id, DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') AS created_at "
+                    "FROM subscribers ORDER BY created_at DESC")
+        rows = cur.fetchall()
+        return [(int(r["user_id"]), r["created_at"]) for r in rows]
+
 def remove_subscriber(user_id: int) -> None:
     with db.cursor() as cur:
         cur.execute("DELETE FROM subscribers WHERE user_id=%s", (user_id,))
 
-# ================================ СТАНИ ====================================
+def count_threads(period_days: int | None = None) -> int:
+    with db.cursor() as cur:
+        if period_days is None:
+            cur.execute("SELECT COUNT(*) AS c FROM operator_threads")
+            return int(cur.fetchone()["c"])
+        else:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM operator_threads "
+                "WHERE created_at >= NOW() - INTERVAL %s DAY",
+                (int(period_days),),
+            )
+            return int(cur.fetchone()["c"])
 
-class SendBroadcast(StatesGroup):
-    waiting_content = State()
+def count_errors(period_days: int | None = None) -> int:
+    with db.cursor() as cur:
+        if period_days is None:
+            cur.execute("SELECT COUNT(*) AS c FROM error_logs")
+            return int(cur.fetchone()["c"])
+        else:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM error_logs "
+                "WHERE created_at >= NOW() - INTERVAL %s DAY",
+                (int(period_days),),
+            )
+            return int(cur.fetchone()["c"])
 
-class OperatorQuestion(StatesGroup):
-    waiting_text = State()
+def save_error(place: str, detail: str) -> None:
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO error_logs (place, detail) VALUES (%s, %s)",
+            (place[:64], detail[:65535]),
+        )
 
-class TTNRequest(StatesGroup):
-    waiting_name = State()
-    waiting_order = State()
+# ============================ СЕРВІСНІ Ф-ЦІЇ ===============================
 
-class BillRequest(StatesGroup):
-    waiting_name = State()
-    waiting_order = State()
-
-# ============================ АНТИСПАМ =====================================
-
-class ThrottleMiddleware(BaseMiddleware):
-    def __init__(self, rate: float = 0.7):
-        self.rate = rate
-        self._last: dict[int, float] = {}
-
-    async def __call__(self, handler, event, data):
-        user = getattr(event, "from_user", None)
-        if user and user.id:
-            now = time.monotonic()
-            last = self._last.get(user.id, 0.0)
-            if now - last < self.rate:
-                return
-            self._last[user.id] = now
-        return await handler(event, data)
-
-# ============================ БОТ/ДИСПЕТЧЕР ================================
-
-bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
-dp.message.outer_middleware(ThrottleMiddleware(0.7))
-
-# ============================== КОРИСНЕ ====================================
+async def report_error(place: str, detail: str):
+    save_error(place, detail)
+    logger.error("%s | %s", place, detail)
+    if ERROR_CHAT_ID:
+        try:
+            msg = f"⚠️ <b>Помилка</b>\n<b>Де:</b> {place}\n<b>Деталі:</b> <code>{detail}</code>"
+            await bot.send_message(ERROR_CHAT_ID, msg)
+        except Exception as e:
+            logger.warning(f"Failed to send error to log chat: {e}")
 
 def extract_ttn(text: Optional[str]) -> Optional[str]:
     if not text:
@@ -207,6 +247,40 @@ def tracking_kb(ttn: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="Відстежити ТТН", url=url)]]
     )
+
+# ============================ АНТИСПАМ =====================================
+
+class ThrottleMiddleware(BaseMiddleware):
+    def __init__(self, rate: float = 0.7, burst_cnt: int = 6, burst_window: float = 10.0):
+        self.rate = rate
+        self._last: dict[int, float] = {}
+        self.burst_cnt = burst_cnt
+        self.burst_window = burst_window
+        self._hist: dict[int, List[float]] = {}
+
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        if user and user.id:
+            now = time.monotonic()
+            # simple rate
+            last = self._last.get(user.id, 0.0)
+            if now - last < self.rate:
+                return
+            self._last[user.id] = now
+            # burst check
+            hist = self._hist.setdefault(user.id, [])
+            hist.append(now)
+            self._hist[user.id] = [t for t in hist if now - t <= self.burst_window]
+            if len(self._hist[user.id]) > self.burst_cnt:
+                # тихо ігноруємо "сплеск"
+                return
+        return await handler(event, data)
+
+# ============================ БОТ/ДИСПЕТЧЕР ================================
+
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
+dp.message.outer_middleware(ThrottleMiddleware(0.7, 6, 10.0))
 
 # ============================== КЛАВІАТУРИ ================================
 
@@ -231,6 +305,29 @@ def back_kb() -> ReplyKeyboardMarkup:
         is_persistent=True,
     )
 
+# --------- Швидкі відповіді (інлайн для адміна)
+
+TEMPLATES: dict[str, str] = {
+    "thanks": "Дякуємо за оплату! Замовлення готуємо до відправки.",
+    "shipped": "Замовлення відправлено. ТТН надамо найближчим часом.",
+    "wait": "Замовлення в роботі. Просимо трохи зачекати — ми вже опрацюємо ваше звернення.",
+    "hello": "Дякуємо за звернення! Відповімо найближчим часом.",
+}
+
+def templates_kb(uid: int) -> InlineKeyboardMarkup:
+    # callback_data: tpl|<uid>|<key>
+    row1 = [
+        InlineKeyboardButton(text="🙏 Дякуємо за оплату", callback_data=f"tpl|{uid}|thanks"),
+    ]
+    row2 = [
+        InlineKeyboardButton(text="📦 Відправлено", callback_data=f"tpl|{uid}|shipped"),
+        InlineKeyboardButton(text="⏳ Очікуйте", callback_data=f"tpl|{uid}|wait"),
+    ]
+    row3 = [
+        InlineKeyboardButton(text="👋 Прийняли", callback_data=f"tpl|{uid}|hello"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3])
+
 # =========================== КОМАНДИ БОТА ==================================
 
 def user_commands() -> list[BotCommand]:
@@ -244,6 +341,8 @@ def admin_commands() -> list[BotCommand]:
     return user_commands() + [
         BotCommand(command="reply", description="Відповідь: /reply <id> <текст>"),
         BotCommand(command="broadcast", description="Зробити розсилку"),
+        BotCommand(command="stats", description="Статистика"),
+        BotCommand(command="export", description="Експорт підписників (CSV)"),
     ]
 
 async def setup_bot_commands(bot: Bot):
@@ -253,6 +352,22 @@ async def setup_bot_commands(bot: Bot):
             await bot.set_my_commands(admin_commands(), scope=BotCommandScopeChat(chat_id=aid))
         except Exception as e:
             logger.warning(f"set_my_commands for admin {aid} failed: {e}")
+
+# ================================ СТАНИ ====================================
+
+class SendBroadcast(StatesGroup):
+    waiting_content = State()
+
+class OperatorQuestion(StatesGroup):
+    waiting_text = State()
+
+class TTNRequest(StatesGroup):
+    waiting_name = State()
+    waiting_order = State()
+
+class BillRequest(StatesGroup):
+    waiting_name = State()
+    waiting_order = State()
 
 # ============================== ХЕНДЛЕРИ ===================================
 
@@ -280,11 +395,6 @@ async def whoami(message: types.Message):
         f"Ваш user_id: <code>{message.from_user.id}</code>\nАдмін: {status}",
         reply_markup=main_kb(message.from_user.id),
     )
-
-@dp.message(F.text == BACK_BTN)
-async def go_back(message: types.Message, state: FSMContext):
-    await state.clear()
-    await menu(message)
 
 # -------- Інформація
 
@@ -323,34 +433,40 @@ async def got_question(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     text = message.text or ""
 
-    with db.cursor() as cur:
-        cur.execute(
-            "INSERT INTO operator_threads (user_id, question) VALUES (%s, %s)",
-            (user_id, text),
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO operator_threads (user_id, question) VALUES (%s, %s)",
+                (user_id, text),
+            )
+            thread_id = cur.lastrowid
+
+        note = (
+            f"Питання від користувача <code>{user_id}</code>\n"
+            f"Thread #{thread_id}\n\n{text}"
         )
-        thread_id = cur.lastrowid
-
-    note = (
-        f"Питання від користувача <code>{user_id}</code>\n"
-        f"Thread #{thread_id}\n\n{text}"
-    )
-    sent = await bot.send_message(
-        ADMIN_ID_PRIMARY,
-        note,
-        reply_markup=ForceReply(input_field_placeholder="Напишіть відповідь користувачу…"),
-    )
-
-    with db.cursor() as cur:
-        cur.execute(
-            "UPDATE operator_threads SET admin_message_id=%s WHERE id=%s",
-            (sent.message_id, thread_id),
+        sent = await bot.send_message(
+            ADMIN_ID_PRIMARY,
+            note,
+            reply_markup=ForceReply(input_field_placeholder="Напишіть відповідь користувачу…"),
         )
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE operator_threads SET admin_message_id=%s WHERE id=%s",
+                (sent.message_id, thread_id),
+            )
+        # Швидкі шаблони під рукою
+        await bot.send_message(ADMIN_ID_PRIMARY, "Швидкі відповіді:", reply_markup=templates_kb(user_id))
 
-    await message.answer(
-        "Ваше питання надіслано оператору. Дякуємо за звернення.",
-        reply_markup=main_kb(message.from_user.id),
-    )
-    await state.clear()
+        await message.answer(
+            "Ваше питання надіслано оператору. Дякуємо за звернення.",
+            reply_markup=main_kb(message.from_user.id),
+        )
+    except Exception as e:
+        await report_error("got_question", str(e))
+        await message.answer("Сталася помилка. Спробуйте пізніше.")
+    finally:
+        await state.clear()
 
 # ----------------------- Запит ТТН -----------------------------------------
 
@@ -372,30 +488,37 @@ async def ttn_order(message: types.Message, state: FSMContext):
     name = data.get("ttn_name", "-")
     order_no = (message.text or "").strip()
 
-    with db.cursor() as cur:
-        cur.execute(
-            "INSERT INTO operator_threads (user_id, question) VALUES (%s, %s)",
-            (user_id, f"[TTN]\nПІБ: {name}\nЗамовлення: {order_no}"),
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO operator_threads (user_id, question) VALUES (%s, %s)",
+                (user_id, f"[TTN]\nПІБ: {name}\nЗамовлення: {order_no}"),
+            )
+            thread_id = cur.lastrowid
+
+        note = (
+            f"Запит ТТН від користувача <code>{user_id}</code>\n"
+            f"ПІБ: <b>{name}</b>\nЗамовлення: <b>{order_no}</b>\n"
+            f"Thread #{thread_id}\n\n"
+            f"Відповідайте реплаєм: вкажіть номер ТТН (14 цифр)."
         )
-        thread_id = cur.lastrowid
+        sent = await bot.send_message(
+            ADMIN_ID_PRIMARY,
+            note,
+            reply_markup=ForceReply(input_field_placeholder="Введіть ТТН або відповідь…"),
+        )
+        with db.cursor() as cur:
+            cur.execute("UPDATE operator_threads SET admin_message_id=%s WHERE id=%s", (sent.message_id, thread_id))
 
-    note = (
-        f"Запит ТТН від користувача <code>{user_id}</code>\n"
-        f"ПІБ: <b>{name}</b>\nЗамовлення: <b>{order_no}</b>\n"
-        f"Thread #{thread_id}\n\n"
-        f"Відповідайте реплаєм: напишіть номер ТТН (14 цифр) і, за потреби, коментар."
-    )
-    sent = await bot.send_message(
-        ADMIN_ID_PRIMARY,
-        note,
-        reply_markup=ForceReply(input_field_placeholder="Введіть ТТН або відповідь…"),
-    )
+        # Додамо й тут шаблони — інколи корисно
+        await bot.send_message(ADMIN_ID_PRIMARY, "Швидкі відповіді:", reply_markup=templates_kb(user_id))
 
-    with db.cursor() as cur:
-        cur.execute("UPDATE operator_threads SET admin_message_id=%s WHERE id=%s", (sent.message_id, thread_id))
-
-    await message.answer("Дякуємо! Ми перевіримо ТТН і надішлемо вам відповідь.", reply_markup=main_kb(user_id))
-    await state.clear()
+        await message.answer("Дякуємо! Ми перевіримо ТТН і надішлемо вам відповідь.", reply_markup=main_kb(user_id))
+    except Exception as e:
+        await report_error("ttn_order", str(e))
+        await message.answer("Сталася помилка. Спробуйте пізніше.", reply_markup=main_kb(user_id))
+    finally:
+        await state.clear()
 
 # ----------------------- Запит Рахунку -------------------------------------
 
@@ -417,32 +540,51 @@ async def bill_order(message: types.Message, state: FSMContext):
     name = data.get("bill_name", "-")
     order_no = (message.text or "").strip()
 
-    with db.cursor() as cur:
-        cur.execute(
-            "INSERT INTO operator_threads (user_id, question) VALUES (%s, %s)",
-            (user_id, f"[BILL]\nПІБ: {name}\nЗамовлення: {order_no}"),
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO operator_threads (user_id, question) VALUES (%s, %s)",
+                (user_id, f"[BILL]\nПІБ: {name}\nЗамовлення: {order_no}"),
+            )
+            thread_id = cur.lastrowid
+
+        note = (
+            f"Запит РАХУНКУ від користувача <code>{user_id}</code>\n"
+            f"ПІБ: <b>{name}</b>\nЗамовлення: <b>{order_no}</b>\n"
+            f"Thread #{thread_id}\n\n"
+            f"Надішліть реквізити/рахунок у цьому reply."
         )
-        thread_id = cur.lastrowid
+        sent = await bot.send_message(
+            ADMIN_ID_PRIMARY,
+            note,
+            reply_markup=ForceReply(input_field_placeholder="Надішліть реквізити/рахунок…"),
+        )
+        with db.cursor() as cur:
+            cur.execute("UPDATE operator_threads SET admin_message_id=%s WHERE id=%s", (sent.message_id, thread_id))
 
-    note = (
-        f"Запит РАХУНКУ від користувача <code>{user_id}</code>\n"
-        f"ПІБ: <b>{name}</b>\nЗамовлення: <b>{order_no}</b>\n"
-        f"Thread #{thread_id}\n\n"
-        f"Надішліть реквізити/рахунок у цьому reply."
-    )
-    sent = await bot.send_message(
-        ADMIN_ID_PRIMARY,
-        note,
-        reply_markup=ForceReply(input_field_placeholder="Надішліть реквізити/рахунок…"),
-    )
-
-    with db.cursor() as cur:
-        cur.execute("UPDATE operator_threads SET admin_message_id=%s WHERE id=%s", (sent.message_id, thread_id))
-
-    await message.answer("Дякуємо! Надішлемо вам реквізити для оплати.", reply_markup=main_kb(user_id))
-    await state.clear()
+        await bot.send_message(ADMIN_ID_PRIMARY, "Швидкі відповіді:", reply_markup=templates_kb(user_id))
+        await message.answer("Дякуємо! Надішлемо вам реквізити для оплати.", reply_markup=main_kb(user_id))
+    except Exception as e:
+        await report_error("bill_order", str(e))
+        await message.answer("Сталася помилка. Спробуйте пізніше.", reply_markup=main_kb(user_id))
+    finally:
+        await state.clear()
 
 # ============================ ВІДПОВІДІ АДМІНА ============================
+
+@dp.callback_query(F.data.startswith("tpl|"))
+async def template_send(cb: types.CallbackQuery):
+    try:
+        _, uid_str, key = cb.data.split("|", 2)
+        uid = int(uid_str)
+        text = TEMPLATES.get(key)
+        if not text:
+            await cb.answer("Невідомий шаблон", show_alert=True); return
+        await bot.send_message(uid, text, reply_markup=main_kb(uid))
+        await cb.answer("Надіслано")
+    except Exception as e:
+        await report_error("template_send", str(e))
+        await cb.answer("Помилка", show_alert=True)
 
 @dp.message()
 async def admin_router(message: types.Message, state: FSMContext):
@@ -452,42 +594,50 @@ async def admin_router(message: types.Message, state: FSMContext):
     # 1) Відповідь реплаєм на службове повідомлення
     if message.reply_to_message and message.reply_to_message.message_id:
         admin_msg_id = message.reply_to_message.message_id
-        with db.cursor() as cur:
-            cur.execute(
-                "SELECT user_id FROM operator_threads "
-                "WHERE admin_message_id=%s ORDER BY id DESC LIMIT 1",
-                (admin_msg_id,),
-            )
-            row = cur.fetchone()
+        try:
+            with db.cursor() as cur:
+                cur.execute(
+                    "SELECT user_id, question FROM operator_threads "
+                    "WHERE admin_message_id=%s ORDER BY id DESC LIMIT 1",
+                    (admin_msg_id,),
+                )
+                row = cur.fetchone()
+            if row:
+                uid = int(row["user_id"])
+                qtext = row["question"] or ""
 
-        if row:
-            uid = int(row["user_id"])
-            try:
-                # Якщо адмін надіслав 14-значний номер — формуємо текст «Ваша ТТН…»
+                # Якщо це тред типу [TTN] — перевіряємо 14 цифр
+                is_ttn_thread = "[TTN]" in qtext
                 ttn = extract_ttn(message.text or message.caption or "")
+
+                if is_ttn_thread and not ttn:
+                    await message.reply("Це запит ТТН: номер має містити 14 цифр. Будь ласка, введіть правильний ТТН.")
+                    return
+
                 if ttn:
-                    # приберемо сам номер із «коментаря», якщо він є
                     rest = (message.text or message.caption or "")
                     rest = re.sub(re.escape(ttn), "", rest).strip()
                     text_out = f"Ваша ТТН Нової пошти: <code>{ttn}</code>"
                     if rest:
                         text_out += f"\n{rest}"
-
                     await bot.send_message(uid, text_out, reply_markup=tracking_kb(ttn))
-                    await bot.send_message(uid, "Якщо маєте ще питання — натисніть «Питання оператору».", reply_markup=main_kb(uid))
+                    await bot.send_message(uid, "Якщо маєте ще питання — натисніть «Питання оператору».",
+                                           reply_markup=main_kb(uid))
                 else:
                     if message.photo:
-                        await bot.send_photo(uid, message.photo[-1].file_id, caption=message.caption or "", reply_markup=main_kb(uid))
+                        await bot.send_photo(uid, message.photo[-1].file_id,
+                                             caption=message.caption or "", reply_markup=main_kb(uid))
                     else:
                         await bot.send_message(uid, message.text or "", reply_markup=main_kb(uid))
                 await message.reply("Надіслано користувачу")
                 return
-            except TelegramForbiddenError:
-                await message.reply("Користувач заблокував бота або недоступний")
-                return
-            except Exception as e:
-                await message.reply(f"Помилка відправки: {e}")
-                return
+        except TelegramForbiddenError:
+            await message.reply("Користувач заблокував бота або недоступний")
+            return
+        except Exception as e:
+            await report_error("admin_router_reply", str(e))
+            await message.reply(f"Помилка відправки: {e}")
+            return
 
     # 2) Альтернатива: /reply <user_id> <текст>
     if message.text and message.text.startswith("/reply"):
@@ -502,11 +652,13 @@ async def admin_router(message: types.Message, state: FSMContext):
                     if rest:
                         text_out += f"\n{rest}"
                     await bot.send_message(uid, text_out, reply_markup=tracking_kb(ttn))
-                    await bot.send_message(uid, "Якщо маєте ще питання — натисніть «Питання оператору».", reply_markup=main_kb(uid))
+                    await bot.send_message(uid, "Якщо маєте ще питання — натисніть «Питання оператору».",
+                                           reply_markup=main_kb(uid))
                 else:
                     await bot.send_message(uid, txt, reply_markup=main_kb(uid))
                 await message.reply("Надіслано користувачу")
             except Exception as e:
+                await report_error("admin_router_cmd_reply", str(e))
                 await message.reply(f"Помилка відправки: {e}")
             return
 
@@ -546,13 +698,57 @@ async def do_broadcast(text: str = "", photo_id: Optional[str] = None, caption: 
         except (TelegramForbiddenError, TelegramBadRequest):
             blocked += 1; remove_subscriber(uid)
         except Exception as e:
-            logger.warning(f"Broadcast to {uid} failed: {e}")
+            await report_error("broadcast_loop", f"{uid}: {e}")
         await asyncio.sleep(0.05)
 
     try:
-        await bot.send_message(ADMIN_ID_PRIMARY, f"Розсилка завершена. Успішно: {ok}, видалено зі списку: {blocked}.")
+        await bot.send_message(ADMIN_ID_PRIMARY,
+                               f"Розсилка завершена. Успішно: {ok}, видалено зі списку: {blocked}.")
     except Exception:
         pass
+
+# =========================== АДМІН: СТАТИСТИКА/ЕКСПОРТ ====================
+
+@dp.message(Command("stats"))
+async def stats(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    try:
+        total_subs = len(get_all_subscribers())
+        threads7 = count_threads(7)
+        threads_total = count_threads(None)
+        err7 = count_errors(7)
+        err_total = count_errors(None)
+        text = (
+            "<b>Статистика</b>\n"
+            f"👥 Підписників: <b>{total_subs}</b>\n"
+            f"💬 Тредів за 7 днів: <b>{threads7}</b>\n"
+            f"💬 Тредів всього: <b>{threads_total}</b>\n"
+            f"⚠️ Помилки за 7 днів: <b>{err7}</b>\n"
+            f"⚠️ Помилки всього: <b>{err_total}</b>"
+        )
+        await message.answer(text)
+    except Exception as e:
+        await report_error("stats", str(e))
+        await message.answer("Не вдалося отримати статистику.")
+
+@dp.message(Command("export"))
+async def export_csv(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    try:
+        rows = get_subscribers_full()
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["user_id", "created_at"])
+        for uid, created in rows:
+            writer.writerow([uid, created])
+        data = buf.getvalue().encode("utf-8")
+        file = BufferedInputFile(data, filename="subscribers.csv")
+        await message.answer_document(file, caption=f"Експортовано: {len(rows)} записів")
+    except Exception as e:
+        await report_error("export_csv", str(e))
+        await message.answer("Не вдалося сформувати CSV.")
 
 # =============================== MAIN ======================================
 
