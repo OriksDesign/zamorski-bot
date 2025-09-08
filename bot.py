@@ -2,6 +2,7 @@ import os
 import re
 import csv
 import io
+import html
 import asyncio
 import logging
 import time
@@ -32,6 +33,11 @@ from aiogram.dispatcher.middlewares.base import BaseMiddleware
 
 API_TOKEN = os.getenv("API_TOKEN", "").strip()
 ERROR_CHAT_ID_RAW = os.getenv("ERROR_CHAT_ID", "").strip()  # -100..., @channel або пусто
+
+# Хуки для картки товару
+PRODUCT_DB_TABLE = os.getenv("PRODUCT_DB_TABLE", "").strip()  # якщо в БД є таблиця товарів
+PRODUCT_API_URL = os.getenv("PRODUCT_API_URL", "").strip()    # шаблон, напр.: https://site/api/sku/{code}
+PRODUCT_URL_TMPL = os.getenv("PRODUCT_URL_TMPL", "").strip()  # шаблон посилання, напр.: https://site/p/{code}
 
 ADMIN_IDS: set[int] = set()
 _admin_single = os.getenv("ADMIN_ID", "").strip()
@@ -179,7 +185,7 @@ def get_all_subscribers() -> List[int]:
 def get_subscribers_full() -> List[Tuple[int, str]]:
     with db.cursor() as cur:
         cur.execute(
-            "SELECT user_id, DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') AS created_at "
+            "SELECT user_id, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at "
             "FROM subscribers ORDER BY created_at DESC"
         )
         rows = cur.fetchall()
@@ -244,6 +250,75 @@ def tracking_kb(ttn: str) -> InlineKeyboardMarkup:
         inline_keyboard=[[InlineKeyboardButton(text="Відстежити ТТН", url=url)]]
     )
 
+# ---- Хук для картки товару -----------------------------------------------
+# Повертає dict: {sku,title,price,url,image_url} або None
+async def fetch_product_by_code(code: str) -> Optional[dict]:
+    # 1) Спроба з БД, якщо задано PRODUCT_DB_TABLE
+    if PRODUCT_DB_TABLE:
+        try:
+            with db.cursor() as cur:
+                cur.execute(
+                    f"SELECT sku, title, price, url, image_url FROM {PRODUCT_DB_TABLE} WHERE sku=%s LIMIT 1",
+                    (code,),
+                )
+                row = cur.fetchone()
+            if row:
+                url = row.get("url") or (PRODUCT_URL_TMPL.format(code=code) if PRODUCT_URL_TMPL else None)
+                return {
+                    "sku": row.get("sku") or code,
+                    "title": row.get("title") or code,
+                    "price": row.get("price"),
+                    "url": url,
+                    "image_url": row.get("image_url"),
+                }
+        except Exception as e:
+            await report_error("fetch_product_db", str(e))
+
+    # 2) Спроба через HTTP API, якщо задано PRODUCT_API_URL
+    if PRODUCT_API_URL:
+        try:
+            import httpx  # імпортуємо тільки коли потрібно
+            api_url = PRODUCT_API_URL.format(code=code)
+            async with httpx.AsyncClient(timeout=7.0, follow_redirects=True) as client:
+                r = await client.get(api_url)
+                if r.status_code == 200:
+                    j = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+                    title = j.get("title") or j.get("name") or j.get("product", {}).get("title")
+                    price = j.get("price") or j.get("product", {}).get("price")
+                    url = j.get("url") or (PRODUCT_URL_TMPL.format(code=code) if PRODUCT_URL_TMPL else None)
+                    image_url = j.get("image_url") or j.get("image") or j.get("photo")
+                    return {"sku": code, "title": title, "price": price, "url": url, "image_url": image_url}
+        except Exception as e:
+            await report_error("fetch_product_api", str(e))
+
+    # 3) Фолбек — лише посилання за шаблоном, якщо задано
+    if PRODUCT_URL_TMPL:
+        return {"sku": code, "title": f"Товар {code}", "price": None, "url": PRODUCT_URL_TMPL.format(code=code), "image_url": None}
+
+    return None
+
+async def send_product_preview(chat_id: int, product: dict):
+    title = product.get("title") or f"Товар {product.get('sku','')}"
+    price = product.get("price")
+    url = product.get("url")
+    image_url = product.get("image_url")
+
+    caption = f"<b>{html.escape(str(title))}</b>"
+    if price not in (None, ""):
+        caption += f"\nЦіна: <b>{price}</b>"
+    if product.get("sku"):
+        caption += f"\nКод: <code>{product['sku']}</code>"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Відкрити на сайті", url=url)]]) if url else None
+
+    if image_url:
+        try:
+            await bot.send_photo(chat_id, image_url, caption=caption, reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await bot.send_message(chat_id, caption + (f"\n{url}" if url else ""), reply_markup=kb)
+
 # ============================ АНТИСПАМ =====================================
 
 class ThrottleMiddleware(BaseMiddleware):
@@ -258,12 +333,10 @@ class ThrottleMiddleware(BaseMiddleware):
         user = getattr(event, "from_user", None)
         if user and user.id:
             now = time.monotonic()
-            # simple rate
             last = self._last.get(user.id, 0.0)
             if now - last < self.rate:
                 return
             self._last[user.id] = now
-            # burst check
             hist = self._hist.setdefault(user.id, [])
             hist.append(now)
             self._hist[user.id] = [t for t in hist if now - t <= self.burst_window]
@@ -286,6 +359,7 @@ def main_kb(user_id: int) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="Умови співпраці")],
         [KeyboardButton(text="Питання оператору")],
         [KeyboardButton(text="Новинки")],
+        [KeyboardButton(text="Перевірити наявність товару")],
         [KeyboardButton(text="Запитати рахунок для сплати замовлення")],
         [KeyboardButton(text="Запитати ТТН по замовленню")],
     ]
@@ -307,6 +381,10 @@ TEMPLATES: dict[str, str] = {
     "shipped": "Замовлення відправлено. ТТН надамо найближчим часом.",
     "wait": "Замовлення в роботі. Просимо трохи зачекати — ми вже опрацюємо ваше звернення.",
     "hello": "Дякуємо за звернення! Відповімо найближчим часом.",
+    # для наявності
+    "stock_yes": "✅ Є в наявності. Готові оформити замовлення?",
+    "stock_no": "❌ Немає в наявності. Можемо запропонувати альтернативу.",
+    "stock_eta": "🚚 Очікуємо найближче надходження. Орієнтовно: 1–3 дні.",
 }
 
 def templates_kb(uid: int) -> InlineKeyboardMarkup:
@@ -316,7 +394,12 @@ def templates_kb(uid: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="⏳ Очікуйте", callback_data=f"tpl|{uid}|wait"),
     ]
     row3 = [InlineKeyboardButton(text="👋 Прийняли", callback_data=f"tpl|{uid}|hello")]
-    return InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3])
+    row4 = [
+        InlineKeyboardButton(text="✅ Є", callback_data=f"tpl|{uid}|stock_yes"),
+        InlineKeyboardButton(text="❌ Немає", callback_data=f"tpl|{uid}|stock_no"),
+        InlineKeyboardButton(text="🚚 ETA", callback_data=f"tpl|{uid}|stock_eta"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3, row4])
 
 # =========================== КОМАНДИ БОТА ==================================
 
@@ -343,7 +426,7 @@ async def setup_bot_commands(bot: Bot):
         except Exception as e:
             logger.warning(f"set_my_commands for admin {aid} failed: {e}")
 
-# ================================ СТАНИ ====================================
+# ================================ СТАНи ====================================
 
 class SendBroadcast(StatesGroup):
     waiting_content = State()
@@ -358,6 +441,9 @@ class TTNRequest(StatesGroup):
 class BillRequest(StatesGroup):
     waiting_name = State()
     waiting_order = State()
+
+class StockRequest(StatesGroup):
+    waiting_code = State()
 
 # ------------------------- АЛІАСИ ДЛЯ REPLY-ID -----------------------------
 # key: admin_message_id (будь-яке службове), value: (user_id, is_ttn_thread)
@@ -406,9 +492,7 @@ async def terms(message: types.Message):
 @dp.message(F.text == "Новинки")
 async def news(message: types.Message):
     kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Відкрити сайт", url="https://zamorskiepodarki.com/uk")]
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text="Відкрити сайт", url="https://zamorskiepodarki.com/uk")]]
     )
     await message.answer("Слідкуйте за новинками на нашому сайті.", reply_markup=kb)
 
@@ -445,7 +529,6 @@ async def got_question(message: types.Message, state: FSMContext):
                 "UPDATE operator_threads SET admin_message_id=%s WHERE id=%s",
                 (sent.message_id, thread_id),
             )
-        # Швидкі шаблони під рукою
         tpl_msg = await bot.send_message(ADMIN_ID_PRIMARY, "Швидкі відповіді:", reply_markup=templates_kb(user_id))
         reply_alias[tpl_msg.message_id] = (user_id, False)
 
@@ -456,6 +539,63 @@ async def got_question(message: types.Message, state: FSMContext):
     except Exception as e:
         await report_error("got_question", str(e))
         await message.answer("Сталася помилка. Спробуйте пізніше.")
+    finally:
+        await state.clear()
+
+# ----------------------- Перевірити наявність ------------------------------
+
+@dp.message(F.text == "Перевірити наявність товару")
+async def stock_start(message: types.Message, state: FSMContext):
+    await message.answer(
+        "Вкажіть <b>код товару</b> (SKU/артикул), напр.: <code>ABC-123</code>.",
+        reply_markup=back_kb(),
+    )
+    await state.set_state(StockRequest.waiting_code)
+
+@dp.message(StockRequest.waiting_code)
+async def stock_got_code(message: types.Message, state: FSMContext):
+    code = (message.text or "").strip()
+    # Базова валідація коду: 3..32 символи, букви/цифри та - _ / .
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_\-\/.]{2,31}", code):
+        await message.answer(
+            "Здається, це не схоже на код товару. Спробуйте ще раз (3–32 символи, букви/цифри та - _ / .)."
+        )
+        return
+
+    user_id = message.from_user.id
+    try:
+        # Збережемо тред для оператора
+        with db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO operator_threads (user_id, question) VALUES (%s, %s)",
+                (user_id, f"[STOCK]\nКод: {code}"),
+            )
+            thread_id = cur.lastrowid
+
+        # Надішлемо адміну службове повідомлення + шаблони
+        note = (
+            f"Запит <b>НАЯВНОСТІ</b> від користувача <code>{user_id}</code>\n"
+            f"Код товару: <b>{code}</b>\n"
+            f"Thread #{thread_id}\n\nВідповідайте реплаєм статусом/коментарем (можна скористатися швидкими кнопками)."
+        )
+        sent = await bot.send_message(
+            ADMIN_ID_PRIMARY,
+            note,
+            reply_markup=ForceReply(input_field_placeholder="Вкажіть статус/коментар…"),
+        )
+        with db.cursor() as cur:
+            cur.execute("UPDATE operator_threads SET admin_message_id=%s WHERE id=%s", (sent.message_id, thread_id))
+        tpl_msg = await bot.send_message(ADMIN_ID_PRIMARY, "Швидкі відповіді:", reply_markup=templates_kb(user_id))
+        reply_alias[tpl_msg.message_id] = (user_id, False)
+
+        # Автопідтягування картки товару (для користувача)
+        product = await fetch_product_by_code(code)
+        if product:
+            await send_product_preview(user_id, product)
+        await message.answer("Дякуємо! Перевіримо наявність і відповімо вам незабаром.", reply_markup=main_kb(user_id))
+    except Exception as e:
+        await report_error("stock_got_code", str(e))
+        await message.answer("Сталася помилка. Спробуйте пізніше.", reply_markup=main_kb(user_id))
     finally:
         await state.clear()
 
@@ -490,8 +630,7 @@ async def ttn_order(message: types.Message, state: FSMContext):
         note = (
             f"Запит ТТН від користувача <code>{user_id}</code>\n"
             f"ПІБ: <b>{name}</b>\nЗамовлення: <b>{order_no}</b>\n"
-            f"Thread #{thread_id}\n\n"
-            f"Відповідайте реплаєм: вкажіть номер ТТН (14 цифр)."
+            f"Thread #{thread_id}\n\nВідповідайте реплаєм: вкажіть номер ТТН (14 цифр)."
         )
         sent = await bot.send_message(
             ADMIN_ID_PRIMARY,
@@ -542,8 +681,7 @@ async def bill_order(message: types.Message, state: FSMContext):
         note = (
             f"Запит РАХУНКУ від користувача <code>{user_id}</code>\n"
             f"ПІБ: <b>{name}</b>\nЗамовлення: <b>{order_no}</b>\n"
-            f"Thread #{thread_id}\n\n"
-            f"Надішліть реквізити/рахунок у цьому reply."
+            f"Thread #{thread_id}\n\nНадішліть реквізити/рахунок у цьому reply."
         )
         sent = await bot.send_message(
             ADMIN_ID_PRIMARY,
@@ -590,7 +728,6 @@ async def admin_reply_to_service(message: types.Message):
         is_ttn_thread = False
         qtext = ""
 
-        # Спершу шукаємо у БД основний service message
         with db.cursor() as cur:
             cur.execute(
                 "SELECT user_id, question FROM operator_threads "
@@ -603,7 +740,6 @@ async def admin_reply_to_service(message: types.Message):
             qtext = row.get("question") or ""
             is_ttn_thread = "[TTN]" in qtext
 
-        # Якщо не знайшли — дивимось у alias map (для ForceReply/кнопок)
         if uid is None and admin_msg_id in reply_alias:
             uid, is_ttn_thread = reply_alias[admin_msg_id]
 
@@ -618,7 +754,6 @@ async def admin_reply_to_service(message: types.Message):
                 "Це запит ТТН: номер має містити 14 цифр. Будь ласка, введіть правильний ТТН.",
                 reply_markup=ForceReply(input_field_placeholder="Вкажіть номер ТТН (14 цифр)"),
             )
-            # Прив’язуємо і це повідомлення
             reply_alias[warn.message_id] = (uid, True)
             return
 
