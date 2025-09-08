@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from typing import Optional, List
+from collections import defaultdict
 
 import pymysql
 from aiogram import Bot, Dispatcher, F, types
@@ -25,10 +26,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 
+# ============================== КОНФІГ =====================================
 
-# ---------------------------------------------------------------------------
-# Конфігурація
-# ---------------------------------------------------------------------------
 API_TOKEN = os.getenv("API_TOKEN", "").strip()
 
 ADMIN_IDS: set[int] = set()
@@ -69,10 +68,8 @@ logger = logging.getLogger("zamorski-bot")
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
 
+# ====================== MySQL (автоперепідключення) ========================
 
-# ---------------------------------------------------------------------------
-# Підключення до MySQL з авто-перепідключенням
-# ---------------------------------------------------------------------------
 class MySQL:
     def __init__(self):
         self.host = os.getenv("DB_HOST")
@@ -115,7 +112,6 @@ class MySQL:
         except Exception as e:
             logger.warning(f"Close MySQL failed: {e}")
 
-
 db = MySQL()
 
 # Таблиці (якщо не існують)
@@ -140,10 +136,8 @@ with db.cursor() as cur:
         """
     )
 
+# =============================== БД-хелпери ================================
 
-# ---------------------------------------------------------------------------
-# Хелпери БД
-# ---------------------------------------------------------------------------
 def add_subscriber(user_id: int) -> None:
     with db.cursor() as cur:
         cur.execute(
@@ -161,10 +155,8 @@ def remove_subscriber(user_id: int) -> None:
     with db.cursor() as cur:
         cur.execute("DELETE FROM subscribers WHERE user_id=%s", (user_id,))
 
+# ================================ СТАНИ ====================================
 
-# ---------------------------------------------------------------------------
-# FSM стани
-# ---------------------------------------------------------------------------
 class SendBroadcast(StatesGroup):
     waiting_content = State()
 
@@ -179,10 +171,8 @@ class BillRequest(StatesGroup):
     waiting_name = State()
     waiting_order = State()
 
+# ============================ АНТИСПАМ =====================================
 
-# ---------------------------------------------------------------------------
-# Анти-спам (тротлінг) middleware: 1 повідомлення / 0.7s
-# ---------------------------------------------------------------------------
 class ThrottleMiddleware(BaseMiddleware):
     def __init__(self, rate: float = 0.7):
         self.rate = rate
@@ -194,43 +184,44 @@ class ThrottleMiddleware(BaseMiddleware):
             now = time.monotonic()
             last = self._last.get(user.id, 0.0)
             if now - last < self.rate:
-                return  # тихо ігноруємо
+                return
             self._last[user.id] = now
         return await handler(event, data)
 
+# ============================ БОТ/ДИСПЕТЧЕР ================================
 
-# ---------------------------------------------------------------------------
-# Бот / Диспетчер
-# ---------------------------------------------------------------------------
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-dp.message.outer_middleware(ThrottleMiddleware(0.7))  # вмикаємо тротлінг
+dp.message.outer_middleware(ThrottleMiddleware(0.7))
 
+# ============================== КОРИСНЕ ====================================
 
-# ---------------------------------------------------------------------------
-# Клавіатури
-# ---------------------------------------------------------------------------
+def extract_ttn(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return None
+    m = re.search(r"\b\d{14}\b", text)
+    return m.group(0) if m else None
+
+def tracking_kb(ttn: str) -> InlineKeyboardMarkup:
+    url = f"https://tracking.novaposhta.ua/#/uk/parcel/tracking/{ttn}"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Відстежити ТТН", url=url)]]
+    )
+
+# ============================== КЛАВІАТУРИ ================================
+
 BACK_BTN = "⬅️ Назад у меню"
-
-BTN_TERMS = "Умови співпраці"
-BTN_ASK = "Питання оператору"
-BTN_NEWS = "Новинки"
-BTN_SUB = "Підписатися на розсилку"
-BTN_BILL = "Запитати рахунок для сплати замовлення"
-BTN_TTN  = "Запитати ТТН по замовленню"
-BTN_BROADCAST = "Зробити розсилку"
 
 def main_kb(user_id: int) -> ReplyKeyboardMarkup:
     rows = [
-        [KeyboardButton(text=BTN_TERMS)],
-        [KeyboardButton(text=BTN_ASK)],
-        [KeyboardButton(text=BTN_NEWS)],
-        [KeyboardButton(text=BTN_BILL)],
-        [KeyboardButton(text=BTN_TTN)],
-        [KeyboardButton(text=BTN_SUB)],
+        [KeyboardButton(text="Умови співпраці")],
+        [KeyboardButton(text="Питання оператору")],
+        [KeyboardButton(text="Новинки")],
+        [KeyboardButton(text="Запитати рахунок для сплати замовлення")],
+        [KeyboardButton(text="Запитати ТТН по замовленню")],
     ]
     if is_admin(user_id):
-        rows.append([KeyboardButton(text=BTN_BROADCAST)])
+        rows.append([KeyboardButton(text="Зробити розсилку")])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 def back_kb() -> ReplyKeyboardMarkup:
@@ -240,10 +231,8 @@ def back_kb() -> ReplyKeyboardMarkup:
         is_persistent=True,
     )
 
+# =========================== КОМАНДИ БОТА ==================================
 
-# ---------------------------------------------------------------------------
-# Команди бота (без /help)
-# ---------------------------------------------------------------------------
 def user_commands() -> list[BotCommand]:
     return [
         BotCommand(command="start", description="Почати / показати меню"),
@@ -265,20 +254,8 @@ async def setup_bot_commands(bot: Bot):
         except Exception as e:
             logger.warning(f"set_my_commands for admin {aid} failed: {e}")
 
+# ============================== ХЕНДЛЕРИ ===================================
 
-# ---------------------------------------------------------------------------
-# Утиліти
-# ---------------------------------------------------------------------------
-async def typing(chat_id: int):
-    try:
-        await bot.send_chat_action(chat_id, "typing")
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------------------
-# Хендлери базові
-# ---------------------------------------------------------------------------
 @dp.message(CommandStart())
 async def start(message: types.Message):
     add_subscriber(message.from_user.id)
@@ -309,11 +286,9 @@ async def go_back(message: types.Message, state: FSMContext):
     await state.clear()
     await menu(message)
 
+# -------- Інформація
 
-# ---------------------------------------------------------------------------
-# Користувацькі кнопки
-# ---------------------------------------------------------------------------
-@dp.message(F.text == BTN_TERMS)
+@dp.message(F.text == "Умови співпраці")
 async def terms(message: types.Message):
     text = (
         "Наші умови співпраці:\n"
@@ -324,7 +299,7 @@ async def terms(message: types.Message):
     )
     await message.answer(text, reply_markup=main_kb(message.from_user.id))
 
-@dp.message(F.text == BTN_NEWS)
+@dp.message(F.text == "Новинки")
 async def news(message: types.Message):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -333,16 +308,10 @@ async def news(message: types.Message):
     )
     await message.answer("Слідкуйте за новинками на нашому сайті.", reply_markup=kb)
 
-@dp.message(F.text == BTN_SUB)
-async def subscribe(message: types.Message):
-    add_subscriber(message.from_user.id)
-    await message.answer("Готово. Ви у списку розсилки.", reply_markup=main_kb(message.from_user.id))
+# ----------------------- Питання оператору ---------------------------------
 
-
-# ----------------------- Питання оператору -------------------------------
-@dp.message(F.text == BTN_ASK)
+@dp.message(F.text == "Питання оператору")
 async def ask_operator(message: types.Message, state: FSMContext):
-    await typing(message.chat.id)
     await message.answer(
         "Напишіть ваше питання. Ми відповімо якнайшвидше.",
         reply_markup=back_kb(),
@@ -351,7 +320,6 @@ async def ask_operator(message: types.Message, state: FSMContext):
 
 @dp.message(OperatorQuestion.waiting_text)
 async def got_question(message: types.Message, state: FSMContext):
-    await typing(message.chat.id)
     user_id = message.from_user.id
     text = message.text or ""
 
@@ -384,27 +352,26 @@ async def got_question(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
+# ----------------------- Запит ТТН -----------------------------------------
 
-# ----------------------- ЗАПИТ ТТН ----------------------------------------
-@dp.message(F.text.in_({BTN_TTN, "Запитати ТТН Нової пошти"}))
+@dp.message(F.text == "Запитати ТТН по замовленню")
 async def ttn_start(message: types.Message, state: FSMContext):
     await message.answer("Вкажіть ПІБ отримувача (як у замовленні).", reply_markup=back_kb())
     await state.set_state(TTNRequest.waiting_name)
 
 @dp.message(TTNRequest.waiting_name)
-async def ttn_got_name(message: types.Message, state: FSMContext):
-    await state.update_data(ttn_name=message.text.strip())
+async def ttn_name(message: types.Message, state: FSMContext):
+    await state.update_data(ttn_name=(message.text or "").strip())
     await message.answer("Вкажіть номер замовлення.")
     await state.set_state(TTNRequest.waiting_order)
 
 @dp.message(TTNRequest.waiting_order)
-async def ttn_got_order(message: types.Message, state: FSMContext):
+async def ttn_order(message: types.Message, state: FSMContext):
     data = await state.get_data()
     user_id = message.from_user.id
     name = data.get("ttn_name", "-")
-    order_no = message.text.strip()
+    order_no = (message.text or "").strip()
 
-    # Запис у БД
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO operator_threads (user_id, question) VALUES (%s, %s)",
@@ -412,51 +379,43 @@ async def ttn_got_order(message: types.Message, state: FSMContext):
         )
         thread_id = cur.lastrowid
 
-    # 1) Інфо адміну
-    info = (
+    note = (
         f"Запит ТТН від користувача <code>{user_id}</code>\n"
         f"ПІБ: <b>{name}</b>\nЗамовлення: <b>{order_no}</b>\n"
         f"Thread #{thread_id}\n\n"
-        f"Натисніть reply на наступне повідомлення і допишіть номер."
+        f"Відповідайте реплаєм: напишіть номер ТТН (14 цифр) і, за потреби, коментар."
     )
-    await bot.send_message(ADMIN_ID_PRIMARY, info)
-
-    # 2) Повідомлення-заготовка (на НЕГО робимо reply)
-    stub = await bot.send_message(
+    sent = await bot.send_message(
         ADMIN_ID_PRIMARY,
-        "Ваша ТТН Нової пошти ",
-        reply_markup=ForceReply(input_field_placeholder="Введіть ТТН…"),
+        note,
+        reply_markup=ForceReply(input_field_placeholder="Введіть ТТН або відповідь…"),
     )
 
-    # Прив'язуємо саме заготовку
     with db.cursor() as cur:
-        cur.execute(
-            "UPDATE operator_threads SET admin_message_id=%s WHERE id=%s",
-            (stub.message_id, thread_id),
-        )
+        cur.execute("UPDATE operator_threads SET admin_message_id=%s WHERE id=%s", (sent.message_id, thread_id))
 
     await message.answer("Дякуємо! Ми перевіримо ТТН і надішлемо вам відповідь.", reply_markup=main_kb(user_id))
     await state.clear()
 
+# ----------------------- Запит Рахунку -------------------------------------
 
-# ----------------------- ЗАПИТ РАХУНКУ -----------------------------------
-@dp.message(F.text == BTN_BILL)
+@dp.message(F.text == "Запитати рахунок для сплати замовлення")
 async def bill_start(message: types.Message, state: FSMContext):
     await message.answer("Вкажіть ПІБ платника (як у замовленні).", reply_markup=back_kb())
     await state.set_state(BillRequest.waiting_name)
 
 @dp.message(BillRequest.waiting_name)
-async def bill_got_name(message: types.Message, state: FSMContext):
-    await state.update_data(bill_name=message.text.strip())
+async def bill_name(message: types.Message, state: FSMContext):
+    await state.update_data(bill_name=(message.text or "").strip())
     await message.answer("Вкажіть номер замовлення.")
     await state.set_state(BillRequest.waiting_order)
 
 @dp.message(BillRequest.waiting_order)
-async def bill_got_order(message: types.Message, state: FSMContext):
+async def bill_order(message: types.Message, state: FSMContext):
     data = await state.get_data()
     user_id = message.from_user.id
     name = data.get("bill_name", "-")
-    order_no = message.text.strip()
+    order_no = (message.text or "").strip()
 
     with db.cursor() as cur:
         cur.execute(
@@ -468,25 +427,23 @@ async def bill_got_order(message: types.Message, state: FSMContext):
     note = (
         f"Запит РАХУНКУ від користувача <code>{user_id}</code>\n"
         f"ПІБ: <b>{name}</b>\nЗамовлення: <b>{order_no}</b>\n"
-        f"Thread #{thread_id}\n\nВідповідайте реквізитами/рахунком у цьому Reply."
+        f"Thread #{thread_id}\n\n"
+        f"Надішліть реквізити/рахунок у цьому reply."
     )
     sent = await bot.send_message(
         ADMIN_ID_PRIMARY,
         note,
-        reply_markup=ForceReply(input_field_placeholder="Надішліть реквізити / рахунок…"),
+        reply_markup=ForceReply(input_field_placeholder="Надішліть реквізити/рахунок…"),
     )
 
     with db.cursor() as cur:
-        cur.execute(
-            "UPDATE operator_threads SET admin_message_id=%s WHERE id=%s",
-            (sent.message_id, thread_id),
-        )
+        cur.execute("UPDATE operator_threads SET admin_message_id=%s WHERE id=%s", (sent.message_id, thread_id))
 
     await message.answer("Дякуємо! Надішлемо вам реквізити для оплати.", reply_markup=main_kb(user_id))
     await state.clear()
 
+# ============================ ВІДПОВІДІ АДМІНА ============================
 
-# ----------------------- Адмін-роутер ------------------------------------
 @dp.message()
 async def admin_router(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -502,16 +459,27 @@ async def admin_router(message: types.Message, state: FSMContext):
                 (admin_msg_id,),
             )
             row = cur.fetchone()
+
         if row:
             uid = int(row["user_id"])
             try:
-                if message.photo:
-                    await bot.send_photo(
-                        uid, message.photo[-1].file_id, caption=message.caption or "",
-                        reply_markup=main_kb(uid),
-                    )
+                # Якщо адмін надіслав 14-значний номер — формуємо текст «Ваша ТТН…»
+                ttn = extract_ttn(message.text or message.caption or "")
+                if ttn:
+                    # приберемо сам номер із «коментаря», якщо він є
+                    rest = (message.text or message.caption or "")
+                    rest = re.sub(re.escape(ttn), "", rest).strip()
+                    text_out = f"Ваша ТТН Нової пошти: <code>{ttn}</code>"
+                    if rest:
+                        text_out += f"\n{rest}"
+
+                    await bot.send_message(uid, text_out, reply_markup=tracking_kb(ttn))
+                    await bot.send_message(uid, "Якщо маєте ще питання — натисніть «Питання оператору».", reply_markup=main_kb(uid))
                 else:
-                    await bot.send_message(uid, message.text or "", reply_markup=main_kb(uid))
+                    if message.photo:
+                        await bot.send_photo(uid, message.photo[-1].file_id, caption=message.caption or "", reply_markup=main_kb(uid))
+                    else:
+                        await bot.send_message(uid, message.text or "", reply_markup=main_kb(uid))
                 await message.reply("Надіслано користувачу")
                 return
             except TelegramForbiddenError:
@@ -521,25 +489,34 @@ async def admin_router(message: types.Message, state: FSMContext):
                 await message.reply(f"Помилка відправки: {e}")
                 return
 
-    # 2) Альтернатива без reply: /reply <user_id> <текст>
+    # 2) Альтернатива: /reply <user_id> <текст>
     if message.text and message.text.startswith("/reply"):
         parts = message.text.split(maxsplit=2)
         if len(parts) >= 3 and parts[1].isdigit():
             uid = int(parts[1]); txt = parts[2]
             try:
-                await bot.send_message(uid, txt, reply_markup=main_kb(uid))
+                ttn = extract_ttn(txt)
+                if ttn:
+                    rest = re.sub(re.escape(ttn), "", txt).strip()
+                    text_out = f"Ваша ТТН Нової пошти: <code>{ttn}</code>"
+                    if rest:
+                        text_out += f"\n{rest}"
+                    await bot.send_message(uid, text_out, reply_markup=tracking_kb(ttn))
+                    await bot.send_message(uid, "Якщо маєте ще питання — натисніть «Питання оператору».", reply_markup=main_kb(uid))
+                else:
+                    await bot.send_message(uid, txt, reply_markup=main_kb(uid))
                 await message.reply("Надіслано користувачу")
             except Exception as e:
                 await message.reply(f"Помилка відправки: {e}")
             return
 
     # 3) Розсилка
-    if message.text == BTN_BROADCAST:
+    if message.text == "Зробити розсилку":
         await message.answer("Надішліть текст або фото з підписом для розсилки.", reply_markup=back_kb())
         await state.set_state(SendBroadcast.waiting_content)
 
+# =========================== РОЗСИЛКА (АДМІН) =============================
 
-# ----------------------- Розсилка ----------------------------------------
 @dp.message(SendBroadcast.waiting_content, F.photo)
 async def broadcast_photo(message: types.Message, state: FSMContext):
     await do_broadcast(photo_id=message.photo[-1].file_id, caption=message.caption or "")
@@ -565,27 +542,20 @@ async def do_broadcast(text: str = "", photo_id: Optional[str] = None, caption: 
                 await bot.send_message(uid, text)
             ok += 1
         except TelegramRetryAfter as e:
-            await asyncio.sleep(e.retry_after + 1)
-            continue
+            await asyncio.sleep(e.retry_after + 1); continue
         except (TelegramForbiddenError, TelegramBadRequest):
-            blocked += 1
-            remove_subscriber(uid)
+            blocked += 1; remove_subscriber(uid)
         except Exception as e:
             logger.warning(f"Broadcast to {uid} failed: {e}")
-        await asyncio.sleep(0.05)  # анти-флуд
+        await asyncio.sleep(0.05)
 
     try:
-        await bot.send_message(
-            ADMIN_ID_PRIMARY,
-            f"Розсилка завершена. Успішно: {ok}, видалено зі списку: {blocked}.",
-        )
+        await bot.send_message(ADMIN_ID_PRIMARY, f"Розсилка завершена. Успішно: {ok}, видалено зі списку: {blocked}.")
     except Exception:
         pass
 
+# =============================== MAIN ======================================
 
-# ---------------------------------------------------------------------------
-# Точка входу
-# ---------------------------------------------------------------------------
 async def main():
     try:
         await bot.delete_webhook(drop_pending_updates=True)
